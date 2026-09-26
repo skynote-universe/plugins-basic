@@ -1,0 +1,42 @@
+{
+  "name": "@skynote/plugins-basic",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "SkyNote official basic nodes (text, card, shapes) and interactions",
+  "license": "Apache-2.0",
+  "sideEffects": false,
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./free-text": {
+      "types": "./src/nodes/free-text/index.ts",
+      "import": "./src/nodes/free-text/index.ts"
+    },
+    "./card": {
+      "types": "./src/nodes/card/index.ts",
+      "import": "./src/nodes/card/index.ts"
+    },
+    "./shapes": {
+      "types": "./src/nodes/shapes/index.ts",
+      "import": "./src/nodes/shapes/index.ts"
+    },
+    "./interactions": {
+      "types": "./src/interactions/index.ts",
+      "import": "./src/interactions/index.ts"
+    },
+    "./history": {
+      "types": "./src/history/index.ts",
+      "import": "./src/history/index.ts"
+    }
+  },
+  "dependencies": {
+    "@skynote/core": "workspace:*"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
