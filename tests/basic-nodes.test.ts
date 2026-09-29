@@ -13,7 +13,7 @@ import {
   type TextPrimitive
 } from '@skynote/core';
 import {
-  createBasicNodesPlugin,
+  BasicNodesPlugin,
   createFreeTextNode,
   createShapeNode,
   createStickyNode,
@@ -37,7 +37,7 @@ const fakeMeasurer: TextMeasurer = {
 };
 
 function createEngine(): SkyNoteEngine {
-  return new SkyNoteEngine({ textMeasurer: fakeMeasurer }).use(createBasicNodesPlugin());
+  return new SkyNoteEngine({ textMeasurer: fakeMeasurer }).use(new BasicNodesPlugin());
 }
 
 function compose(engine: SkyNoteEngine, id: string): CanvasPrimitive[] {
