@@ -9,54 +9,78 @@ import {
   SyntheticPointerEvent,
   type CanvasKeyboardEvent,
   type CanvasPrimitive,
+  type IHostBridge,
   type NodeEntity,
+  type OverlayChannel,
   type OverlayOptions,
   type Point,
   type SystemCursor
 } from '@skynote/core';
-import { createBasicInteractionPlugins, BasicNodesPlugin, createShapeNode, SELECTION_PLUGIN_ID } from '../src';
+import {
+  BasicNodesPlugin,
+  EditingShortcutsPlugin,
+  SelectionOutlinePlugin,
+  SelectionPlugin,
+  ViewportNavigationPlugin,
+  SELECTION_PLUGIN_ID
+} from '../src';
 
-/** 记录覆盖层、光标与指针捕获的假宿主 (视口 1000 x 800) */
-function createFakeHost() {
-  const overlay = new Map<string, { primitives: readonly CanvasPrimitive[]; transient: boolean }>();
-  const cursors: SystemCursor[] = [];
-  const captured = new Set<number>();
-  return {
-    overlay,
-    cursors,
-    captured,
-    host: {
-      bridge: {
-        getViewportRect: () => ({ width: 1000, height: 800 }),
-        setCursor: (cursor: SystemCursor) => cursors.push(cursor),
-        capturePointer: (id: number) => captured.add(id),
-        releasePointer: (id: number) => captured.delete(id),
-        destroy: () => {}
-      },
-      overlay: {
-        setPrimitives: (id: string, primitives: readonly CanvasPrimitive[], options?: OverlayOptions) => {
-          if (primitives.length === 0) overlay.delete(id);
-          else overlay.set(id, { primitives, transient: options?.transient ?? false });
-        },
-        clear: (id: string) => overlay.delete(id)
-      }
-    }
-  };
+/** 记录光标与指针捕获的假宿主桥 (视口 1000 x 800) */
+class FakeHostBridge implements IHostBridge {
+  readonly cursors: SystemCursor[] = [];
+  readonly captured = new Set<number>();
+
+  getViewportRect(): { width: number; height: number } {
+    return { width: 1000, height: 800 };
+  }
+
+  setCursor(cursor: SystemCursor): void {
+    this.cursors.push(cursor);
+  }
+
+  capturePointer(pointerId: number): void {
+    this.captured.add(pointerId);
+  }
+
+  releasePointer(pointerId: number): void {
+    this.captured.delete(pointerId);
+  }
+
+  destroy(): void {}
+}
+
+/** 按会话记录当前覆盖层图元的假覆盖层 */
+class FakeOverlay implements OverlayChannel {
+  readonly sessions = new Map<string, { primitives: readonly CanvasPrimitive[]; transient: boolean }>();
+
+  setPrimitives(sessionId: string, primitives: readonly CanvasPrimitive[], options?: OverlayOptions): void {
+    if (primitives.length === 0) this.sessions.delete(sessionId);
+    else this.sessions.set(sessionId, { primitives, transient: options?.transient ?? false });
+  }
+
+  clear(sessionId: string): void {
+    this.sessions.delete(sessionId);
+  }
 }
 
 /** 画布：a (0,0) 与 b (300,0) 两个 160x100 形状，c 在容器 frame (0,400) 内 */
 function setup() {
-  const engine = new SkyNoteEngine().use(new BasicNodesPlugin());
-  for (const plugin of createBasicInteractionPlugins()) engine.use(plugin);
-  const fake = createFakeHost();
-  engine.attachHost(fake.host);
+  const engine = new SkyNoteEngine()
+    .use(new BasicNodesPlugin())
+    .use(new ViewportNavigationPlugin())
+    .use(new SelectionPlugin())
+    .use(new SelectionOutlinePlugin())
+    .use(new EditingShortcutsPlugin());
+  const bridge = new FakeHostBridge();
+  const overlay = new FakeOverlay();
+  engine.attachHost({ bridge, overlay });
   const store = engine.documentStore;
-  store.addNode(createShapeNode({ id: 'a', x: 0, y: 0, zIndex: 'a0' }));
-  store.addNode(createShapeNode({ id: 'b', x: 300, y: 0, zIndex: 'a1' }));
-  store.addNode({ ...createShapeNode({ id: 'frame', x: 0, y: 400, zIndex: 'a2' }), width: 400, height: 300 });
-  store.addNode(createShapeNode({ id: 'c', x: 20, y: 20, zIndex: 'a0', parentId: 'frame' }));
+  engine.createNode({ nodeType: 'shape', id: 'a', x: 0, y: 0 });
+  engine.createNode({ nodeType: 'shape', id: 'b', x: 300, y: 0 });
+  engine.createNode({ nodeType: 'shape', id: 'frame', x: 0, y: 400, width: 400, height: 300 });
+  engine.createNode({ nodeType: 'shape', id: 'c', x: 20, y: 20, parentId: 'frame' });
   store.clearHistory();
-  return { engine, store, ...fake };
+  return { engine, store, overlay: overlay.sessions, cursors: bridge.cursors, captured: bridge.captured };
 }
 
 type Engine = SkyNoteEngine;

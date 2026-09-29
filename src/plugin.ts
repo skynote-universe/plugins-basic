@@ -4,11 +4,9 @@
  */
 
 import type { CanvasPluginContext, SkyNotePlugin } from '@skynote/core';
-import { stickyNodeType } from './nodes/sticky';
-import { freeTextNodeType } from './nodes/free-text';
-import { shapeNodeType } from './nodes/shapes';
-
-export const BASIC_NODE_TYPES = [stickyNodeType, freeTextNodeType, shapeNodeType] as const;
+import { StickyNodeType } from './nodes/sticky';
+import { FreeTextNodeType } from './nodes/free-text';
+import { ShapeNodeType } from './nodes/shapes';
 
 export class BasicNodesPlugin implements SkyNotePlugin {
   readonly id = '@skynote/plugins-basic/nodes';
@@ -16,6 +14,8 @@ export class BasicNodesPlugin implements SkyNotePlugin {
   readonly version = '0.1.0';
 
   install(ctx: CanvasPluginContext): void {
-    for (const definition of BASIC_NODE_TYPES) ctx.registerNodeType(definition);
+    ctx.registerNodeType(new StickyNodeType());
+    ctx.registerNodeType(new FreeTextNodeType());
+    ctx.registerNodeType(new ShapeNodeType());
   }
 }

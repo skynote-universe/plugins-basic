@@ -10,17 +10,17 @@
 
 import {
   createTextBlockPrimitive,
-  defineNodeType,
   resolveTextBlockStyle,
   resolveTextPadding,
   type CanvasPrimitive,
-  type FractionalIndex,
+  type NodeComposeContext,
+  type NodeCreateContent,
   type NodeEntity,
+  type NodeSizingPolicy,
   type NodeStyle,
+  type NodeTextSlotDefinition,
   type NodeTypeDefinition
 } from '@skynote/core';
-
-export const SHAPE_NODE_TYPE = 'shape';
 
 export const SHAPE_GEOMETRIES = ['rectangle', 'ellipse', 'diamond'] as const;
 export type ShapeGeometry = (typeof SHAPE_GEOMETRIES)[number];
@@ -68,13 +68,27 @@ function resolveGeometry(node: NodeEntity): ShapeGeometry {
   return geometry !== undefined && geometry in GEOMETRY_BUILDERS ? geometry : 'rectangle';
 }
 
-// 注册表按通用数据形态存储定义；形状数据的具体结构由 resolveGeometry 在读取时校验
-export const shapeNodeType: NodeTypeDefinition = defineNodeType<Record<string, unknown>>({
-  type: SHAPE_NODE_TYPE,
-  label: '形状',
-  defaultData: { geometry: 'rectangle' },
-  sizingPolicy: 'fixed',
-  slots: [
+export interface ShapeCreateOptions {
+  geometry?: ShapeGeometry;
+  /** 居中标签文字；缺省时不带标签文本块 */
+  label?: string;
+}
+
+declare module '@skynote/core' {
+  interface NodeCreateOptionsMap {
+    shape: ShapeCreateOptions;
+  }
+}
+
+/** 注册表按通用数据形态存储定义；形状数据的具体结构由 resolveGeometry 在读取时校验 */
+export class ShapeNodeType implements NodeTypeDefinition {
+  static readonly TYPE = 'shape';
+
+  readonly type = ShapeNodeType.TYPE;
+  readonly label = '形状';
+  readonly defaultData: ShapeData = { geometry: 'rectangle' };
+  readonly sizingPolicy: NodeSizingPolicy = 'fixed';
+  readonly slots: NodeTextSlotDefinition[] = [
     {
       slot: LABEL_SLOT,
       label: '标签',
@@ -87,8 +101,21 @@ export const shapeNodeType: NodeTypeDefinition = defineNodeType<Record<string, u
         padding: 12
       }
     }
-  ],
-  compose(node, { theme }) {
+  ];
+
+  /** 新形状：默认矩形；给出 label 时才带标签文本块 */
+  createContent(options: ShapeCreateOptions): NodeCreateContent {
+    return {
+      width: SHAPE_DEFAULT_SIZE.width,
+      height: SHAPE_DEFAULT_SIZE.height,
+      data: { geometry: options.geometry ?? 'rectangle' },
+      ...(options.label !== undefined && {
+        textBlocks: [{ id: LABEL_SLOT, slot: LABEL_SLOT, runs: [{ text: options.label }] }]
+      })
+    };
+  }
+
+  compose(node: NodeEntity, { theme }: NodeComposeContext): CanvasPrimitive[] {
     const { style } = node;
     const outline = GEOMETRY_BUILDERS[resolveGeometry(node)](node.width, node.height, {
       fill: typeof style?.fill === 'string' ? style.fill : theme.nodeFill,
@@ -100,7 +127,7 @@ export const shapeNodeType: NodeTypeDefinition = defineNodeType<Record<string, u
 
     const block = node.textBlocks?.find((b) => b.slot === LABEL_SLOT);
     if (block) {
-      const textStyle = resolveTextBlockStyle(node, block, shapeNodeType);
+      const textStyle = resolveTextBlockStyle(node, block, this);
       const padding = resolveTextPadding(textStyle.padding);
       primitives.push(
         createTextBlockPrimitive(block, textStyle, {
@@ -113,35 +140,4 @@ export const shapeNodeType: NodeTypeDefinition = defineNodeType<Record<string, u
     }
     return primitives;
   }
-});
-
-export interface ShapeInit {
-  id: string;
-  /** 左上角 (父容器局部坐标) */
-  x: number;
-  y: number;
-  zIndex: FractionalIndex;
-  parentId?: string;
-  geometry?: ShapeGeometry;
-  label?: string;
-}
-
-export function createShapeNode(init: ShapeInit): NodeEntity {
-  return {
-    id: init.id,
-    type: 'node',
-    nodeType: SHAPE_NODE_TYPE,
-    ...(init.parentId !== undefined && { parentId: init.parentId }),
-    x: init.x,
-    y: init.y,
-    width: SHAPE_DEFAULT_SIZE.width,
-    height: SHAPE_DEFAULT_SIZE.height,
-    rotation: 0,
-    zIndex: init.zIndex,
-    locked: false,
-    data: { geometry: init.geometry ?? 'rectangle' },
-    ...(init.label !== undefined && {
-      textBlocks: [{ id: LABEL_SLOT, slot: LABEL_SLOT, runs: [{ text: init.label }] }]
-    })
-  };
 }

@@ -11,15 +11,16 @@
 
 import {
   createTextBlockPrimitive,
-  defineNodeType,
   resolveTextBlockStyle,
-  type FractionalIndex,
+  type CanvasPrimitive,
+  type NodeCreateContent,
   type NodeEntity,
+  type NodeSizingPolicy,
+  type NodeTextSlotDefinition,
   type NodeTypeDefinition,
-  type TextBlock
+  type TextBlock,
+  type TextBlockMetrics
 } from '@skynote/core';
-
-export const FREE_TEXT_NODE_TYPE = 'free-text';
 const BODY_SLOT = 'body';
 
 /** 固定宽度折行时的排版宽度；自由伸缩时返回 undefined (不折行) */
@@ -27,51 +28,48 @@ function wrapWidth(node: NodeEntity, block: TextBlock): number | undefined {
   return block.sizing === 'auto-height' ? (block.explicitWidth ?? node.width) : undefined;
 }
 
-export const freeTextNodeType: NodeTypeDefinition = defineNodeType({
-  type: FREE_TEXT_NODE_TYPE,
-  label: '文本',
-  defaultData: {},
-  sizingPolicy: 'content-driven',
-  slots: [{ slot: BODY_SLOT, label: '正文', defaultStyle: { fontSize: 18, lineHeight: 1.4 } }],
-  computeBounds(node, metrics) {
+export interface FreeTextCreateOptions {
+  text?: string;
+}
+
+declare module '@skynote/core' {
+  interface NodeCreateOptionsMap {
+    'free-text': FreeTextCreateOptions;
+  }
+}
+
+export class FreeTextNodeType implements NodeTypeDefinition {
+  static readonly TYPE = 'free-text';
+
+  readonly type = FreeTextNodeType.TYPE;
+  readonly label = '文本';
+  readonly defaultData = {};
+  readonly sizingPolicy: NodeSizingPolicy = 'content-driven';
+  readonly slots: NodeTextSlotDefinition[] = [
+    { slot: BODY_SLOT, label: '正文', defaultStyle: { fontSize: 18, lineHeight: 1.4 } }
+  ];
+
+  /** 初始宽高为 0：注入文本测量器时，提交事务内即派生出实际尺寸 (ADR-105) */
+  createContent(options: FreeTextCreateOptions): NodeCreateContent {
+    return {
+      width: 0,
+      height: 0,
+      textBlocks: [{ id: BODY_SLOT, slot: BODY_SLOT, runs: [{ text: options.text ?? '' }] }]
+    };
+  }
+
+  computeBounds(node: NodeEntity, metrics: Map<string, TextBlockMetrics>): { width: number; height: number } {
     const block = node.textBlocks?.find((b) => b.slot === BODY_SLOT);
     const body = metrics.get(BODY_SLOT);
     if (!block || !body) return { width: node.width, height: node.height };
     // 折行时外框宽度即设定宽度 (内容盒可能更窄)，否则外框随最长一行伸缩
     return { width: Math.ceil(wrapWidth(node, block) ?? body.width), height: Math.ceil(body.height) };
-  },
-  compose(node) {
+  }
+
+  compose(node: NodeEntity): CanvasPrimitive[] {
     const block = node.textBlocks?.find((b) => b.slot === BODY_SLOT);
     if (!block) return [];
-    const style = resolveTextBlockStyle(node, block, freeTextNodeType);
+    const style = resolveTextBlockStyle(node, block, this);
     return [createTextBlockPrimitive(block, style, { x: 0, y: 0, width: wrapWidth(node, block) })];
   }
-});
-
-export interface FreeTextInit {
-  id: string;
-  /** 左上角 (父容器局部坐标) */
-  x: number;
-  y: number;
-  zIndex: FractionalIndex;
-  parentId?: string;
-  text?: string;
-}
-
-/** 初始宽高为 0：注入文本测量器时，提交事务内即派生出实际尺寸 (ADR-105) */
-export function createFreeTextNode(init: FreeTextInit): NodeEntity {
-  return {
-    id: init.id,
-    type: 'node',
-    nodeType: FREE_TEXT_NODE_TYPE,
-    ...(init.parentId !== undefined && { parentId: init.parentId }),
-    x: init.x,
-    y: init.y,
-    width: 0,
-    height: 0,
-    rotation: 0,
-    zIndex: init.zIndex,
-    locked: false,
-    textBlocks: [{ id: BODY_SLOT, slot: BODY_SLOT, runs: [{ text: init.text ?? '' }] }]
-  };
 }

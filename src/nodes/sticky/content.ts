@@ -10,16 +10,16 @@
 
 import {
   createTextBlockPrimitive,
-  defineNodeType,
   resolveTextBlockStyle,
   resolveTextPadding,
   type CanvasPrimitive,
-  type FractionalIndex,
+  type NodeCreateContent,
   type NodeEntity,
-  type NodeTypeDefinition
+  type NodeSizingPolicy,
+  type NodeTextSlotDefinition,
+  type NodeTypeDefinition,
+  type TextBlockMetrics
 } from '@skynote/core';
-
-export const STICKY_NODE_TYPE = 'sticky';
 
 /** 便签可选底色 (调色板名称) */
 export const STICKY_COLORS = ['yellow', 'orange', 'pink', 'purple', 'blue', 'teal', 'green', 'gray'] as const;
@@ -37,12 +37,25 @@ function solidFill(node: NodeEntity): string {
   return typeof fill === 'string' ? fill : `$${DEFAULT_STICKY_COLOR}`;
 }
 
-export const stickyNodeType: NodeTypeDefinition = defineNodeType({
-  type: STICKY_NODE_TYPE,
-  label: '便签',
-  defaultData: {},
-  sizingPolicy: 'height-driven',
-  slots: [
+export interface StickyCreateOptions {
+  text?: string;
+  color?: StickyColor;
+}
+
+declare module '@skynote/core' {
+  interface NodeCreateOptionsMap {
+    sticky: StickyCreateOptions;
+  }
+}
+
+export class StickyNodeType implements NodeTypeDefinition {
+  static readonly TYPE = 'sticky';
+
+  readonly type = StickyNodeType.TYPE;
+  readonly label = '便签';
+  readonly defaultData = {};
+  readonly sizingPolicy: NodeSizingPolicy = 'height-driven';
+  readonly slots: NodeTextSlotDefinition[] = [
     {
       slot: BODY_SLOT,
       label: '正文',
@@ -56,19 +69,31 @@ export const stickyNodeType: NodeTypeDefinition = defineNodeType({
         padding: STICKY_PADDING
       }
     }
-  ],
-  computeBounds(node, metrics) {
+  ];
+
+  /** 新便签：默认方形、黄色底，正文为空 */
+  createContent(options: StickyCreateOptions): NodeCreateContent {
+    return {
+      width: STICKY_DEFAULT_SIZE,
+      height: STICKY_DEFAULT_SIZE,
+      style: { fill: `$${options.color ?? DEFAULT_STICKY_COLOR}` },
+      textBlocks: [{ id: BODY_SLOT, slot: BODY_SLOT, runs: [{ text: options.text ?? '' }] }]
+    };
+  }
+
+  computeBounds(node: NodeEntity, metrics: Map<string, TextBlockMetrics>): { width: number; height: number } {
     const body = metrics.get(BODY_SLOT);
     const textHeight = body ? body.height + STICKY_PADDING * 2 : 0;
     return { width: node.width, height: Math.max(node.width, Math.ceil(textHeight)) };
-  },
-  compose(node) {
+  }
+
+  compose(node: NodeEntity): CanvasPrimitive[] {
     const primitives: CanvasPrimitive[] = [
       { kind: 'rect', x: 0, y: 0, width: node.width, height: node.height, fill: solidFill(node), radius: 4 }
     ];
     const block = node.textBlocks?.find((b) => b.slot === BODY_SLOT);
     if (block) {
-      const style = resolveTextBlockStyle(node, block, stickyNodeType);
+      const style = resolveTextBlockStyle(node, block, this);
       const padding = resolveTextPadding(style.padding);
       primitives.push(
         createTextBlockPrimitive(block, style, {
@@ -81,33 +106,4 @@ export const stickyNodeType: NodeTypeDefinition = defineNodeType({
     }
     return primitives;
   }
-});
-
-export interface StickyInit {
-  id: string;
-  /** 左上角 (父容器局部坐标) */
-  x: number;
-  y: number;
-  zIndex: FractionalIndex;
-  parentId?: string;
-  text?: string;
-  color?: StickyColor;
-}
-
-export function createStickyNode(init: StickyInit): NodeEntity {
-  return {
-    id: init.id,
-    type: 'node',
-    nodeType: STICKY_NODE_TYPE,
-    ...(init.parentId !== undefined && { parentId: init.parentId }),
-    x: init.x,
-    y: init.y,
-    width: STICKY_DEFAULT_SIZE,
-    height: STICKY_DEFAULT_SIZE,
-    rotation: 0,
-    zIndex: init.zIndex,
-    locked: false,
-    style: { fill: `$${init.color ?? DEFAULT_STICKY_COLOR}` },
-    textBlocks: [{ id: BODY_SLOT, slot: BODY_SLOT, runs: [{ text: init.text ?? '' }] }]
-  };
 }
