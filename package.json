@@ -27,10 +27,6 @@
     "./interactions": {
       "types": "./src/interactions/index.ts",
       "import": "./src/interactions/index.ts"
-    },
-    "./history": {
-      "types": "./src/history/index.ts",
-      "import": "./src/history/index.ts"
     }
   },
   "dependencies": {
