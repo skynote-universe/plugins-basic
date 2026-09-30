@@ -6,6 +6,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   SkyNoteEngine,
+  applyMatrix,
   SyntheticPointerEvent,
   SyntheticWheelEvent,
   type CanvasKeyboardEvent,
@@ -22,6 +23,7 @@ import {
   EditingShortcutsPlugin,
   SelectionOutlinePlugin,
   SelectionPlugin,
+  TransformPlugin,
   ViewportNavigationPlugin,
   SELECTION_PLUGIN_ID
 } from '../src';
@@ -65,7 +67,8 @@ function setup() {
     .use(new ViewportNavigationPlugin())
     .use(new SelectionPlugin())
     .use(new SelectionOutlinePlugin())
-    .use(new EditingShortcutsPlugin());
+    .use(new EditingShortcutsPlugin())
+    .use(new TransformPlugin());
   const host = new FakeHost();
   engine.attachHost(host);
   engine.session.setViewportSize({ width: 1000, height: 800 });
@@ -85,7 +88,7 @@ function pointer(
   engine: Engine,
   phase: 'down' | 'move' | 'up',
   point: Point,
-  init: Partial<{ shift: boolean; button: number; client: Point }> = {}
+  init: Partial<{ shift: boolean; alt: boolean; button: number; client: Point }> = {}
 ) {
   const { x, y, zoom } = engine.session.viewport;
   const client = init.client ?? { x: point.x * zoom + x, y: point.y * zoom + y };
@@ -94,7 +97,7 @@ function pointer(
     clientPoint: client,
     target: engine.hitTestNode(point) as NodeEntity | undefined,
     button: init.button ?? 0,
-    modifiers: { shift: init.shift ?? false }
+    modifiers: { shift: init.shift ?? false, alt: init.alt ?? false }
   });
   if (phase === 'down') engine.pointer.dispatchPointerDown(event);
   else if (phase === 'move') engine.pointer.dispatchPointerMove(event);
@@ -360,5 +363,190 @@ describe('选中框', () => {
     engine.plugins.remove('@skynote/plugins-basic/selection-outline');
     expect(overlay.has('selection:outline')).toBe(false);
     expect(engine.plugins.get(SELECTION_PLUGIN_ID)).toBeDefined();
+  });
+});
+
+/** 单击选中 (视口为单位矩阵时屏幕坐标即世界坐标) */
+function click(engine: Engine, point: Point, init: Partial<{ shift: boolean }> = {}) {
+  pointer(engine, 'down', point, init);
+  pointer(engine, 'up', point, init);
+}
+
+/** 从 from 拖到 to (逐帧提交，同一 groupId) */
+function drag(engine: Engine, from: Point, to: Point, init: Partial<{ shift: boolean; alt: boolean }> = {}) {
+  pointer(engine, 'down', from, init);
+  pointer(engine, 'move', to, init);
+  pointer(engine, 'up', to, init);
+}
+
+describe('缩放控制柄', () => {
+  it('拖右下角缩放，对角固定；一次拖拽一步撤销', () => {
+    const { engine, store } = setup();
+    click(engine, { x: 10, y: 10 });
+    drag(engine, { x: 160, y: 100 }, { x: 200, y: 120 });
+    expect(store.getNode('a')).toMatchObject({ x: 0, y: 0, width: 200, height: 120 });
+    store.undo();
+    expect(store.getNode('a')).toMatchObject({ x: 0, y: 0, width: 160, height: 100 });
+  });
+
+  it('Shift 等比 (取变化更大的一轴)，Alt 以中心为基准', () => {
+    const { engine, store } = setup();
+    click(engine, { x: 10, y: 10 });
+    drag(engine, { x: 160, y: 100 }, { x: 240, y: 110 }, { shift: true });
+    expect(store.getNode('a')).toMatchObject({ x: 0, y: 0, width: 240, height: 150 });
+
+    // 右边中点向右 20，Alt 时左边同步外扩 20
+    drag(engine, { x: 240, y: 75 }, { x: 260, y: 75 }, { alt: true });
+    expect(store.getNode('a')).toMatchObject({ x: -20, y: 0, width: 280, height: 150 });
+  });
+
+  it('旋转后的节点沿自身坐标轴缩放，对角在世界中保持不动', () => {
+    const { engine, store } = setup();
+    store.updateNode('a', { rotation: 90 }, { undoable: false });
+    click(engine, { x: 80, y: 50 });
+    // 旋转 90° 后本地右下角 (160, 100) 位于世界 (30, 130)，本地左上角位于世界 (130, -30)
+    const fixedBefore = applyMatrix(engine.entityStore.getWorldTransform('a')!, 0, 0);
+    drag(engine, { x: 30, y: 130 }, { x: 10, y: 170 });
+    const node = store.getNode('a')!;
+    expect(node.width).toBeCloseTo(200);
+    expect(node.height).toBeCloseTo(120);
+    const fixedAfter = applyMatrix(engine.entityStore.getWorldTransform('a')!, 0, 0);
+    expect(fixedAfter.x).toBeCloseTo(fixedBefore.x);
+    expect(fixedAfter.y).toBeCloseTo(fixedBefore.y);
+  });
+
+  it('多选含旋转节点时整体强制等比，各节点宽高比不变', () => {
+    const { engine, store } = setup();
+    store.updateNode('b', { rotation: 30 }, { undoable: false });
+    engine.session.setSelection({ nodeIds: ['a', 'b'] });
+    const before = engine.getNodeWorldBounds('b')!;
+    // 整体外框右边中点向右拖：只拖一轴也按等比缩放
+    const right = before.right;
+    const midY = (Math.min(0, before.top) + Math.max(100, before.bottom)) / 2;
+    drag(engine, { x: right, y: midY }, { x: right + 100, y: midY });
+    const a = store.getNode('a')!;
+    const b = store.getNode('b')!;
+    expect(a.width / a.height).toBeCloseTo(1.6);
+    expect(b.width / b.height).toBeCloseTo(1.6);
+    expect(b.rotation).toBeCloseTo(30);
+    expect(a.width).toBeGreaterThan(160);
+  });
+
+  it('锁定比例的节点 (便签默认锁定) 拖边也等比，另一轴以中心为基准；Shift+L 解锁后自由缩放，再按一次恢复锁定', () => {
+    const { engine, store } = setup();
+    store.createNode({ nodeType: 'sticky', id: 's', x: 600, y: 500 });
+    click(engine, { x: 700, y: 600 });
+
+    // 右边向右 50：宽高都变为 250，竖直方向以中心为基准 (上下各扩 25)
+    drag(engine, { x: 800, y: 600 }, { x: 850, y: 600 });
+    expect(store.getNode('s')).toMatchObject({ x: 600, y: 475, width: 250, height: 250 });
+
+    key(engine, 'KeyL', { key: 'L', shiftKey: true });
+    expect(store.getNode('s')!.aspectLocked).toBe(false);
+    drag(engine, { x: 850, y: 600 }, { x: 900, y: 600 });
+    expect(store.getNode('s')).toMatchObject({ x: 600, y: 475, width: 300, height: 250 });
+
+    key(engine, 'KeyL', { key: 'L', shiftKey: true });
+    expect(store.getNode('s')!.aspectLocked).toBe(true);
+    // 锁定后按当前比例 (6:5) 等比
+    drag(engine, { x: 900, y: 600 }, { x: 960, y: 600 });
+    const node = store.getNode('s')!;
+    expect(node.width).toBeCloseTo(360);
+    expect(node.height).toBeCloseTo(300);
+  });
+
+  it('形状默认不锁定比例：锁定后同样只能等比', () => {
+    const { engine, store } = setup();
+    click(engine, { x: 10, y: 10 });
+    key(engine, 'KeyL', { key: 'L', shiftKey: true });
+    drag(engine, { x: 160, y: 50 }, { x: 240, y: 50 });
+    expect(store.getNode('a')).toMatchObject({ width: 240, height: 150 });
+    store.undo();
+    store.undo();
+    expect(store.getNode('a')).toMatchObject({ width: 160, height: 100 });
+    expect(store.getNode('a')!.aspectLocked).toBeUndefined();
+  });
+});
+
+describe('自由文本缩放', () => {
+  function setupText() {
+    const context = setup();
+    context.store.createNode({ nodeType: 'free-text', id: 't', x: 600, y: 300, options: { text: 'hello' } });
+    context.store.updateNode('t', { width: 100, height: 30 }, { undoable: false });
+    click(context.engine, { x: 650, y: 315 });
+    const body = () => context.store.getNode('t')!.textBlocks![0];
+    return { ...context, body };
+  }
+
+  it('拖左右边变为固定宽度，拖上下边变为固定尺寸；双击边不改变尺寸状态 (适应内容只经工具栏)', () => {
+    const { engine, body } = setupText();
+    drag(engine, { x: 700, y: 315 }, { x: 740, y: 315 });
+    expect(body()).toMatchObject({ sizing: 'auto-height', explicitWidth: 140 });
+
+    drag(engine, { x: 670, y: 330 }, { x: 670, y: 360 });
+    expect(body()).toMatchObject({ sizing: 'fixed', explicitWidth: 140, explicitHeight: 60 });
+
+    click(engine, { x: 670, y: 360 });
+    click(engine, { x: 670, y: 360 });
+    expect(body()).toMatchObject({ sizing: 'fixed', explicitWidth: 140, explicitHeight: 60 });
+  });
+
+  it('拖四角等比缩放字号，尺寸状态不变；多帧拖动以开始时为基准，不逐帧叠加', () => {
+    const { engine, body } = setupText();
+    pointer(engine, 'down', { x: 700, y: 330 });
+    pointer(engine, 'move', { x: 720, y: 336 });
+    pointer(engine, 'move', { x: 740, y: 342 });
+    pointer(engine, 'move', { x: 750, y: 345 });
+    pointer(engine, 'up', { x: 750, y: 345 });
+    expect(body().style?.fontSize).toBeCloseTo(27);
+    expect(body().sizing).toBeUndefined();
+  });
+});
+
+describe('旋转', () => {
+  it('从角外热区拖动绕中心旋转，Shift 按 15° 吸附', () => {
+    const { engine, store } = setup();
+    click(engine, { x: 10, y: 10 });
+    // 中心 (80, 50)；角外 (170, 110) 绕中心转 90° 到 (20, 140)
+    drag(engine, { x: 170, y: 110 }, { x: 20, y: 140 });
+    expect(store.getNode('a')!.rotation).toBeCloseTo(90);
+    expect(engine.getNodeWorldBounds('a')!.left).toBeCloseTo(30);
+
+    store.undo();
+    // 转约 47° 时吸附到 45°
+    const target = {
+      x: 80 + Math.cos(Math.atan2(60, 90) + (47 * Math.PI) / 180) * Math.hypot(90, 60),
+      y: 50 + Math.sin(Math.atan2(60, 90) + (47 * Math.PI) / 180) * Math.hypot(90, 60)
+    };
+    drag(engine, { x: 170, y: 110 }, target, { shift: true });
+    expect(store.getNode('a')!.rotation).toBeCloseTo(45);
+  });
+});
+
+describe('精确拾取与悬停高亮', () => {
+  it('椭圆外框的空角不会选中；悬停时沿真实轮廓高亮，已选中的节点不高亮', () => {
+    const { engine, store, overlay } = setup();
+    store.createNode({ nodeType: 'shape', id: 'e', x: 600, y: 0, options: { geometry: 'ellipse' } });
+    expect(engine.hitTestNode({ x: 603, y: 3 })).toBeUndefined();
+    expect(engine.hitTestNode({ x: 680, y: 50 })?.id).toBe('e');
+
+    pointer(engine, 'move', { x: 680, y: 50 });
+    const hover = overlay.get('selection:hover')!.primitives[0] as { points: number[] };
+    expect(hover.points.length).toBe(64 * 2);
+
+    click(engine, { x: 680, y: 50 });
+    pointer(engine, 'move', { x: 681, y: 50 });
+    expect(overlay.has('selection:hover')).toBe(false);
+  });
+});
+
+describe('失焦复位', () => {
+  it('按住空格时窗口失焦，回来后左键不再平移画布', () => {
+    const { engine } = setup();
+    key(engine, 'Space', { key: ' ' });
+    engine.inputScopes.dispatchBlur();
+    const before = { ...engine.session.viewport };
+    drag(engine, { x: 700, y: 300 }, { x: 750, y: 350 });
+    expect(engine.session.viewport).toEqual(before);
   });
 });

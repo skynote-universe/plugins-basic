@@ -7,6 +7,7 @@ import { describe, it, expect } from 'vitest';
 import {
   SkyNoteEngine,
   applyThemeToPrimitives,
+  isAspectLocked,
   CANVAS_PALETTE,
   type CanvasPrimitive,
   type TextMeasurer,
@@ -53,7 +54,7 @@ describe('基础节点插件', () => {
 });
 
 describe('便签', () => {
-  it('短文本保持正方形，文字放不下时向下撑高，删减文字后回到正方形', () => {
+  it('外框由用户决定：文字再多也不撑大便签，放不下时显示省略号；默认锁定比例', () => {
     const engine = createEngine();
     engine.documentStore.createNode({ nodeType: 'sticky', id: 's', x: 0, y: 0, options: { text: '短' } });
     expect(engine.documentStore.getNode('s')).toMatchObject({
@@ -61,15 +62,39 @@ describe('便签', () => {
       height: STICKY_DEFAULT_SIZE
     });
 
-    // 每行可容纳 (200 - 32) / 8 = 21 个字，16px × 1.4 行高；300 字约 15 行
     setText(engine, 's', '字'.repeat(300));
-    const grown = engine.documentStore.getNode('s')!;
-    expect(grown.width).toBe(STICKY_DEFAULT_SIZE);
-    expect(grown.height).toBeGreaterThan(STICKY_DEFAULT_SIZE);
-    expect(grown.height).toBe(Math.ceil(Math.ceil(2400 / 168) * 16 * 1.4 + 32));
+    expect(engine.documentStore.getNode('s')).toMatchObject({
+      width: STICKY_DEFAULT_SIZE,
+      height: STICKY_DEFAULT_SIZE
+    });
+    const [, text] = compose(engine, 's') as [CanvasPrimitive, TextPrimitive];
+    expect(text).toMatchObject({ height: 168, textOverflow: 'ellipsis' });
 
-    setText(engine, 's', '短');
-    expect(engine.documentStore.getNode('s')!.height).toBe(STICKY_DEFAULT_SIZE);
+    const node = engine.documentStore.getNode('s')!;
+    expect(isAspectLocked(node, engine.nodeTypes.get('sticky'))).toBe(true);
+  });
+
+  it('适应内容：保持宽度，高度一次性调整为刚好放下文字，锁定比例不变；一步撤销；空便签无可适应', () => {
+    const engine = createEngine();
+    const store = engine.documentStore;
+    store.createNode({ nodeType: 'sticky', id: 's', x: 0, y: 0, options: { text: '字'.repeat(300) } });
+    store.createNode({ nodeType: 'sticky', id: 'empty', x: 300, y: 0 });
+    expect(store.canFitContent('s')).toBe(true);
+    expect(store.canFitContent('empty')).toBe(false);
+
+    // 每行 (200 - 32) / 8 = 21 字，300 字 15 行 × 22.4 + 上下内边距 32
+    store.fitContent(['s', 'empty']);
+    expect(store.getNode('s')).toMatchObject({ width: 200, height: Math.ceil(15 * 22.4 + 32) });
+    expect(store.getNode('empty')!.height).toBe(STICKY_DEFAULT_SIZE);
+    expect(store.canFitContent('s')).toBe(false);
+    expect(isAspectLocked(store.getNode('s')!, engine.nodeTypes.get('sticky'))).toBe(true);
+
+    store.undo();
+    expect(store.getNode('s')!.height).toBe(STICKY_DEFAULT_SIZE);
+
+    // 比内边距还窄的便签放不下文字
+    store.updateNode('s', { width: 20 });
+    expect(store.canFitContent('s')).toBe(false);
   });
 
   it('底色解析为调色板颜色，文字居中并占满内边距内的区域', () => {
@@ -134,6 +159,27 @@ describe('自由文本', () => {
     expect(engine.documentStore.getNode('t')).toMatchObject({ width: 180, height: 26 });
     const [text] = compose(engine, 't') as [TextPrimitive];
     expect(text.width).toBeUndefined();
+  });
+
+  it('适应内容一步回到单行自适应 (清除固定宽高)；已适应内容时不可再适应', () => {
+    const engine = createEngine();
+    const store = engine.documentStore;
+    store.createNode({ nodeType: 'free-text', id: 't', x: 0, y: 0, options: { text: 'hello' } });
+    expect(store.canFitContent('t')).toBe(false);
+
+    const [block] = store.getNode('t')!.textBlocks!;
+    store.updateNode('t', { textBlocks: [{ ...block, sizing: 'fixed', explicitWidth: 30, explicitHeight: 80 }] });
+    expect(store.getNode('t')).toMatchObject({ width: 30, height: 80 });
+    expect(store.canFitContent('t')).toBe(true);
+
+    store.fitContent(['t']);
+    const [fitted] = store.getNode('t')!.textBlocks!;
+    expect(fitted.sizing).toBe('auto-width');
+    expect(fitted.explicitWidth).toBeUndefined();
+    expect(fitted.explicitHeight).toBeUndefined();
+    // 'hello' 18px：宽 5 × 9，单行高 18 × 1.4
+    expect(store.getNode('t')).toMatchObject({ width: 45, height: Math.ceil(18 * 1.4) });
+    expect(store.canFitContent('t')).toBe(false);
   });
 });
 

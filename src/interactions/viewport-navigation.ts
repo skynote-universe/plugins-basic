@@ -42,7 +42,8 @@ export class ViewportNavigationPlugin implements SkyNotePlugin, PointerHooks {
       id: 'canvas:viewport-navigation',
       priority: 0,
       onKeyDown: (e) => this.onKeyDown(e),
-      onKeyUp: (e) => this.onKeyUp(e)
+      onKeyUp: (e) => this.onKeyUp(e),
+      onBlur: () => this.releaseSpace()
     });
     // 指针与滚轮优先级不同，分两次注册；滚轮处理方法因此不以 onWheel 命名，避免随 this 以平移优先级注册
     ctx.registerPointerHooks(this, PAN_PRIORITY);
@@ -121,8 +122,14 @@ export class ViewportNavigationPlugin implements SkyNotePlugin, PointerHooks {
 
   private onKeyUp(e: CanvasKeyboardEvent): boolean {
     if (e.code !== 'Space') return false;
+    this.releaseSpace();
+    return true;
+  }
+
+  /** 松开空格；失焦时同样调用，否则切回窗口后仍处于平移模式 */
+  private releaseSpace(): void {
+    if (!this.spaceHeld) return;
     this.spaceHeld = false;
     if (!this.pan) this.ctx.host.setCursor('default');
-    return true;
   }
 }

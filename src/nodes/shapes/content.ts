@@ -19,7 +19,8 @@ import {
   type NodeSizingPolicy,
   type NodeStyle,
   type NodeTextSlotDefinition,
-  type NodeTypeDefinition
+  type NodeTypeDefinition,
+  type Point
 } from '@skynote/core';
 
 export const SHAPE_GEOMETRIES = ['rectangle', 'ellipse', 'diamond'] as const;
@@ -61,6 +62,30 @@ const GEOMETRY_BUILDERS: Record<ShapeGeometry, (w: number, h: number, style: Out
     strokeWidth,
     strokeJoin: 'round'
   })
+};
+
+/** 椭圆轮廓的分段数：拾取精度在常见尺寸下优于 1px */
+const ELLIPSE_SEGMENTS = 64;
+
+/** 形状轮廓 (局部坐标)：用于精确拾取与悬停高亮 */
+const GEOMETRY_OUTLINES: Record<ShapeGeometry, (w: number, h: number) => Point[]> = {
+  rectangle: (w, h) => [
+    { x: 0, y: 0 },
+    { x: w, y: 0 },
+    { x: w, y: h },
+    { x: 0, y: h }
+  ],
+  ellipse: (w, h) =>
+    Array.from({ length: ELLIPSE_SEGMENTS }, (_, i) => {
+      const angle = (i / ELLIPSE_SEGMENTS) * Math.PI * 2;
+      return { x: w / 2 + (Math.cos(angle) * w) / 2, y: h / 2 + (Math.sin(angle) * h) / 2 };
+    }),
+  diamond: (w, h) => [
+    { x: w / 2, y: 0 },
+    { x: w, y: h / 2 },
+    { x: w / 2, y: h },
+    { x: 0, y: h / 2 }
+  ]
 };
 
 function resolveGeometry(node: NodeEntity): ShapeGeometry {
@@ -115,15 +140,19 @@ export class ShapeNodeType implements NodeTypeDefinition {
     };
   }
 
+  outline(node: NodeEntity): Point[] {
+    return GEOMETRY_OUTLINES[resolveGeometry(node)](node.width, node.height);
+  }
+
   compose(node: NodeEntity, { theme }: NodeComposeContext): CanvasPrimitive[] {
     const { style } = node;
-    const outline = GEOMETRY_BUILDERS[resolveGeometry(node)](node.width, node.height, {
+    const shape = GEOMETRY_BUILDERS[resolveGeometry(node)](node.width, node.height, {
       fill: typeof style?.fill === 'string' ? style.fill : theme.nodeFill,
       stroke: style?.stroke ?? theme.nodeStroke,
       strokeWidth: style?.strokeWidth ?? DEFAULT_STROKE_WIDTH,
       radius: style?.radius
     });
-    const primitives: CanvasPrimitive[] = [outline];
+    const primitives: CanvasPrimitive[] = [shape];
 
     const block = node.textBlocks?.find((b) => b.slot === LABEL_SLOT);
     if (block) {

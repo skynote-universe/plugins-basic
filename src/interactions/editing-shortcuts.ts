@@ -1,6 +1,6 @@
 /**
  * @file editing-shortcuts.ts
- * @description 编辑快捷键：删除、撤销重做、全选、取消选择、层级调整、方向键微移
+ * @description 编辑快捷键：删除、撤销重做、全选、取消选择、层级调整、方向键微移、切换比例锁定
  *
  * 设计考量 (Why):
  * 1. 全部注册到焦点栈 (ADR-005)，只在画布持有焦点时生效；文本编辑等更高优先级作用域先行消费，
@@ -9,7 +9,13 @@
  * 3. Esc 清空选区后不消费按键，让更低优先级的兜底 (清除瞬态图元) 继续执行。
  */
 
-import type { CanvasKeyboardEvent, CanvasPluginContext, LayerMove, SkyNotePlugin } from '@skynote/core';
+import {
+  isAspectLocked,
+  type CanvasKeyboardEvent,
+  type CanvasPluginContext,
+  type LayerMove,
+  type SkyNotePlugin
+} from '@skynote/core';
 
 export const EDITING_SHORTCUTS_PLUGIN_ID = '@skynote/plugins-basic/editing-shortcuts';
 /** 方向键微移的世界距离：普通 1，按住 Shift 为 10 */
@@ -58,6 +64,15 @@ export class EditingShortcutsPlugin implements SkyNotePlugin {
       const up = e.code === 'BracketRight';
       const move: LayerMove = e.shiftKey ? (up ? 'front' : 'back') : up ? 'forward' : 'backward';
       document.moveLayers(ids, move);
+    } else if (e.shiftKey && !mod && e.code === 'KeyL') {
+      const ids = this.editableSelection();
+      if (ids.length === 0) return false;
+      // 全部已锁定时解锁，否则全部锁定 (与工具栏开关一致)
+      const allLocked = ids.every((id) => {
+        const node = entities.getNode(id)!.entity;
+        return isAspectLocked(node, this.ctx.nodeTypes.get(node.nodeType));
+      });
+      document.setAspectLocked(ids, !allLocked);
     } else if (!mod && e.key in ARROW_DELTAS) {
       const ids = this.editableSelection();
       if (ids.length === 0) return false;
