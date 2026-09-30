@@ -55,7 +55,7 @@ describe('基础节点插件', () => {
 describe('便签', () => {
   it('短文本保持正方形，文字放不下时向下撑高，删减文字后回到正方形', () => {
     const engine = createEngine();
-    engine.createNode({ nodeType: 'sticky', id: 's', x: 0, y: 0, options: { text: '短' } });
+    engine.documentStore.createNode({ nodeType: 'sticky', id: 's', x: 0, y: 0, options: { text: '短' } });
     expect(engine.documentStore.getNode('s')).toMatchObject({
       width: STICKY_DEFAULT_SIZE,
       height: STICKY_DEFAULT_SIZE
@@ -74,7 +74,13 @@ describe('便签', () => {
 
   it('底色解析为调色板颜色，文字居中并占满内边距内的区域', () => {
     const engine = createEngine();
-    engine.createNode({ nodeType: 'sticky', id: 's', x: 0, y: 0, options: { text: 'hi', color: 'blue' } });
+    engine.documentStore.createNode({
+      nodeType: 'sticky',
+      id: 's',
+      x: 0,
+      y: 0,
+      options: { text: 'hi', color: 'blue' }
+    });
     const [background, text] = compose(engine, 's') as [CanvasPrimitive, TextPrimitive];
     expect(background).toMatchObject({ kind: 'rect', fill: CANVAS_PALETTE.blue, width: 200, height: 200 });
     expect(text).toMatchObject({
@@ -94,7 +100,7 @@ describe('便签', () => {
 describe('自由文本', () => {
   it('创建时即由内容派生尺寸，改文字后外框随之伸缩 (单行不折行)', () => {
     const engine = createEngine();
-    engine.createNode({ nodeType: 'free-text', id: 't', x: 0, y: 0, options: { text: 'abcd' } });
+    engine.documentStore.createNode({ nodeType: 'free-text', id: 't', x: 0, y: 0, options: { text: 'abcd' } });
     // 18px × 0.5 × 4 字 = 36；行高 18 × 1.4 = 25.2 → 26
     expect(engine.documentStore.getNode('t')).toMatchObject({ width: 36, height: 26 });
 
@@ -106,7 +112,7 @@ describe('自由文本', () => {
 
   it('固定宽度 (auto-height) 时外框宽度即设定宽度，文字折行、高度向下撑开，绘制与测量同一宽度', () => {
     const engine = createEngine();
-    engine.createNode({ nodeType: 'free-text', id: 't', x: 0, y: 0, options: { text: 'a'.repeat(20) } });
+    engine.documentStore.createNode({ nodeType: 'free-text', id: 't', x: 0, y: 0, options: { text: 'a'.repeat(20) } });
     engine.documentStore.commit({
       patches: [
         { op: 'set', path: ['content', 'nodes', 't', 'textBlocks', 0, 'sizing'], value: 'auto-height' },
@@ -121,7 +127,7 @@ describe('自由文本', () => {
 
   it('是否折行只看 sizing：残留 explicitWidth 而未设 sizing 时仍按单行测量与绘制', () => {
     const engine = createEngine();
-    engine.createNode({ nodeType: 'free-text', id: 't', x: 0, y: 0, options: { text: 'a'.repeat(20) } });
+    engine.documentStore.createNode({ nodeType: 'free-text', id: 't', x: 0, y: 0, options: { text: 'a'.repeat(20) } });
     engine.documentStore.commit({
       patches: [{ op: 'set', path: ['content', 'nodes', 't', 'textBlocks', 0, 'explicitWidth'], value: 100 }]
     });
@@ -135,9 +141,9 @@ describe('形状', () => {
   it('矩形、椭圆、菱形输出对应轮廓，颜色缺省取主题，显式颜色原样保留', () => {
     const engine = createEngine();
     const theme = engine.session.theme;
-    engine.createNode({ nodeType: 'shape', id: 'r', x: 0, y: 0 });
-    engine.createNode({ nodeType: 'shape', id: 'e', x: 0, y: 0, options: { geometry: 'ellipse' } });
-    engine.createNode({ nodeType: 'shape', id: 'd', x: 0, y: 0, options: { geometry: 'diamond' } });
+    engine.documentStore.createNode({ nodeType: 'shape', id: 'r', x: 0, y: 0 });
+    engine.documentStore.createNode({ nodeType: 'shape', id: 'e', x: 0, y: 0, options: { geometry: 'ellipse' } });
+    engine.documentStore.createNode({ nodeType: 'shape', id: 'd', x: 0, y: 0, options: { geometry: 'diamond' } });
     engine.documentStore.updateNode('d', { style: { fill: '$green' } });
 
     const [rect] = compose(engine, 'r');
@@ -152,7 +158,7 @@ describe('形状', () => {
 
   it('标签居中且超出省略，文字再长也不改变形状尺寸', () => {
     const engine = createEngine();
-    engine.createNode({ nodeType: 'shape', id: 'r', x: 0, y: 0, options: { label: '开始' } });
+    engine.documentStore.createNode({ nodeType: 'shape', id: 'r', x: 0, y: 0, options: { label: '开始' } });
     setText(engine, 'r', '很长的标签'.repeat(40));
     expect(engine.documentStore.getNode('r')).toMatchObject(SHAPE_DEFAULT_SIZE);
     const [, label] = compose(engine, 'r') as [CanvasPrimitive, TextPrimitive];

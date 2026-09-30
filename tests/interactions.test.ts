@@ -7,9 +7,10 @@ import { describe, it, expect } from 'vitest';
 import {
   SkyNoteEngine,
   SyntheticPointerEvent,
+  SyntheticWheelEvent,
   type CanvasKeyboardEvent,
+  type CanvasHost,
   type CanvasPrimitive,
-  type IHostBridge,
   type NodeEntity,
   type OverlayChannel,
   type OverlayOptions,
@@ -25,13 +26,23 @@ import {
   SELECTION_PLUGIN_ID
 } from '../src';
 
-/** 记录光标与指针捕获的假宿主桥 (视口 1000 x 800) */
-class FakeHostBridge implements IHostBridge {
+/** 记录覆盖层、光标与指针捕获的假宿主 */
+class FakeHost implements CanvasHost, OverlayChannel {
+  readonly sessions = new Map<string, { primitives: readonly CanvasPrimitive[]; transient: boolean }>();
   readonly cursors: SystemCursor[] = [];
   readonly captured = new Set<number>();
 
-  getViewportRect(): { width: number; height: number } {
-    return { width: 1000, height: 800 };
+  get overlay(): OverlayChannel {
+    return this;
+  }
+
+  setPrimitives(sessionId: string, primitives: readonly CanvasPrimitive[], options?: OverlayOptions): void {
+    if (primitives.length === 0) this.sessions.delete(sessionId);
+    else this.sessions.set(sessionId, { primitives, transient: options?.transient ?? false });
+  }
+
+  clear(sessionId: string): void {
+    this.sessions.delete(sessionId);
   }
 
   setCursor(cursor: SystemCursor): void {
@@ -45,25 +56,9 @@ class FakeHostBridge implements IHostBridge {
   releasePointer(pointerId: number): void {
     this.captured.delete(pointerId);
   }
-
-  destroy(): void {}
 }
 
-/** 按会话记录当前覆盖层图元的假覆盖层 */
-class FakeOverlay implements OverlayChannel {
-  readonly sessions = new Map<string, { primitives: readonly CanvasPrimitive[]; transient: boolean }>();
-
-  setPrimitives(sessionId: string, primitives: readonly CanvasPrimitive[], options?: OverlayOptions): void {
-    if (primitives.length === 0) this.sessions.delete(sessionId);
-    else this.sessions.set(sessionId, { primitives, transient: options?.transient ?? false });
-  }
-
-  clear(sessionId: string): void {
-    this.sessions.delete(sessionId);
-  }
-}
-
-/** 画布：a (0,0) 与 b (300,0) 两个 160x100 形状，c 在容器 frame (0,400) 内 */
+/** 画布 (视口 1000 x 800)：a (0,0) 与 b (300,0) 两个 160x100 形状，c 在容器 frame (0,400) 内 */
 function setup() {
   const engine = new SkyNoteEngine()
     .use(new BasicNodesPlugin())
@@ -71,16 +66,16 @@ function setup() {
     .use(new SelectionPlugin())
     .use(new SelectionOutlinePlugin())
     .use(new EditingShortcutsPlugin());
-  const bridge = new FakeHostBridge();
-  const overlay = new FakeOverlay();
-  engine.attachHost({ bridge, overlay });
+  const host = new FakeHost();
+  engine.attachHost(host);
+  engine.session.setViewportSize({ width: 1000, height: 800 });
   const store = engine.documentStore;
-  engine.createNode({ nodeType: 'shape', id: 'a', x: 0, y: 0 });
-  engine.createNode({ nodeType: 'shape', id: 'b', x: 300, y: 0 });
-  engine.createNode({ nodeType: 'shape', id: 'frame', x: 0, y: 400, width: 400, height: 300 });
-  engine.createNode({ nodeType: 'shape', id: 'c', x: 20, y: 20, parentId: 'frame' });
+  engine.documentStore.createNode({ nodeType: 'shape', id: 'a', x: 0, y: 0 });
+  engine.documentStore.createNode({ nodeType: 'shape', id: 'b', x: 300, y: 0 });
+  engine.documentStore.createNode({ nodeType: 'shape', id: 'frame', x: 0, y: 400, width: 400, height: 300 });
+  engine.documentStore.createNode({ nodeType: 'shape', id: 'c', x: 20, y: 20, parentId: 'frame' });
   store.clearHistory();
-  return { engine, store, overlay: overlay.sessions, cursors: bridge.cursors, captured: bridge.captured };
+  return { engine, store, overlay: host.sessions, cursors: host.cursors, captured: host.captured };
 }
 
 type Engine = SkyNoteEngine;
@@ -174,7 +169,7 @@ describe('拖拽移动', () => {
     // 子节点局部坐标不变，随容器移动
     expect(store.getNode('c')).toMatchObject({ x: 20, y: 20 });
     expect(cursors).toContain('move');
-    expect(store.coordinator.getUndoEntries()).toHaveLength(1);
+    expect(store.undoEntries).toHaveLength(1);
 
     store.undo();
     expect(store.getNode('a')).toMatchObject({ x: 0, y: 0 });
@@ -261,6 +256,22 @@ describe('视口导航', () => {
     key(engine, 'Digit1', { key: '!', shiftKey: true });
     // 内容 460 x 700 (含容器)，可用高度 800 - 160
     expect(engine.session.viewport.zoom).toBeCloseTo(640 / 700);
+  });
+
+  it('滚轮平移视口；捏合以指针为不动点缩放，快速滚动的巨大增量也不会越出缩放范围', () => {
+    const { engine } = setup();
+    engine.pointer.dispatchWheel(new SyntheticWheelEvent({ centerPoint: { x: 0, y: 0 }, deltaPan: { x: -30, y: 20 } }));
+    expect(engine.session.viewport).toMatchObject({ x: -30, y: 20, zoom: 1 });
+
+    engine.pointer.dispatchWheel(new SyntheticWheelEvent({ centerPoint: { x: 100, y: 100 }, deltaZoom: Math.log(2) }));
+    const { x, y, zoom } = engine.session.viewport;
+    expect(zoom).toBeCloseTo(2);
+    // 世界点 (100, 100) 的屏幕位置不变：缩放前为 (70, 120)
+    expect(100 * zoom + x).toBeCloseTo(70);
+    expect(100 * zoom + y).toBeCloseTo(120);
+
+    engine.pointer.dispatchWheel(new SyntheticWheelEvent({ centerPoint: { x: 0, y: 0 }, deltaZoom: -50 }));
+    expect(engine.session.viewport.zoom).toBe(engine.session.zoomRange.min);
   });
 });
 

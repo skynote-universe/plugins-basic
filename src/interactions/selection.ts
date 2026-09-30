@@ -9,15 +9,16 @@
  * 3. 一次拖拽共用一个 groupId，逐帧提交合并为一步撤销；只移动未锁定的最顶层选中节点 (后代随容器移动，ADR-114)。
  * 4. 框选选中与选框相交的根层级节点 (命中容器内部的子节点时选中其所在的根层级容器)，结果可预期；
  *    进入容器内部选择留给双击进入等后续交互。
- * 5. 选区属于会话状态，其他插件 (选中框、快捷键) 只读取会话，不感知本插件。
  */
 
 import {
+  boundsFromPoints,
   generateId,
   type CanvasPluginContext,
   type CanvasPointerEvent,
   type NodeEntity,
   type Point,
+  type PointerHooks,
   type RectBounds,
   type SkyNotePlugin
 } from '@skynote/core';
@@ -48,15 +49,7 @@ type Gesture =
       baseSelection: ReadonlySet<string>;
     };
 
-function normalizeRect(a: Point, b: Point): RectBounds {
-  const left = Math.min(a.x, b.x);
-  const top = Math.min(a.y, b.y);
-  const right = Math.max(a.x, b.x);
-  const bottom = Math.max(a.y, b.y);
-  return { left, top, right, bottom, width: right - left, height: bottom - top };
-}
-
-export class SelectionPlugin implements SkyNotePlugin {
+export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
   readonly id = SELECTION_PLUGIN_ID;
   readonly name = '选择与移动';
   readonly version = '0.1.0';
@@ -65,6 +58,7 @@ export class SelectionPlugin implements SkyNotePlugin {
 
   install(ctx: CanvasPluginContext): void {
     this.ctx = ctx;
+    ctx.registerPointerHooks(this);
   }
 
   unmount(): void {
@@ -92,10 +86,10 @@ export class SelectionPlugin implements SkyNotePlugin {
     if (!gesture || gesture.pointerId !== e.pointerId) return;
 
     if (gesture.kind === 'marquee') {
-      const rect = normalizeRect(gesture.startWorld, e.point);
+      const rect = boundsFromPoints(gesture.startWorld, e.point);
       this.drawMarquee(rect);
       const hits = new Set(gesture.baseSelection);
-      for (const id of ctx.spatial.search(rect)) hits.add(this.rootAncestorOf(id));
+      for (const id of ctx.spatial.search(rect)) hits.add(ctx.entities.getAncestorIds(id).at(-1) ?? id);
       ctx.session.setSelection({ nodeIds: hits, connectorIds: [] });
       return;
     }
@@ -128,7 +122,7 @@ export class SelectionPlugin implements SkyNotePlugin {
 
   onPointerCancel(e: CanvasPointerEvent): void {
     // 被系统打断时保留已发生的移动 (与正常松手一致)，只清理手势与瞬态图元
-    if (this.gesture && this.gesture.pointerId === e.pointerId) this.finish(e.pointerId);
+    if (this.gesture?.pointerId === e.pointerId) this.finish(e.pointerId);
   }
 
   private pressNode(node: Readonly<NodeEntity>, e: CanvasPointerEvent): void {
@@ -157,17 +151,6 @@ export class SelectionPlugin implements SkyNotePlugin {
     };
   }
 
-  private rootAncestorOf(id: string): string {
-    const { entities } = this.ctx;
-    let node = entities.getNode(id)!.entity;
-    while (node.parentId !== undefined) {
-      const parent = entities.getNode(node.parentId);
-      if (!parent) break;
-      node = parent.entity;
-    }
-    return node.id;
-  }
-
   private drawMarquee(rect: RectBounds): void {
     const { theme, viewport } = this.ctx.session;
     this.ctx.host.overlay.setPrimitives(
@@ -177,8 +160,8 @@ export class SelectionPlugin implements SkyNotePlugin {
           kind: 'rect',
           x: rect.left,
           y: rect.top,
-          width: rect.width,
-          height: rect.height,
+          width: rect.right - rect.left,
+          height: rect.bottom - rect.top,
           fill: theme.selectionStroke,
           fillOpacity: 0.08,
           stroke: theme.selectionStroke,
