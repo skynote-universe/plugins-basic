@@ -10,28 +10,18 @@ import {
   isAspectLocked,
   CANVAS_PALETTE,
   type CanvasPrimitive,
-  type TextMeasurer,
+  type FontMeasurer,
   type TextPrimitive
 } from '@skynote/core';
 import { BasicNodesPlugin, STICKY_DEFAULT_SIZE, SHAPE_DEFAULT_SIZE } from '../src';
 
-/**
- * 确定性测量器：每个字符宽 fontSize × 0.5，行高 fontSize × lineHeight；
- * 给定 maxWidth 时按宽度折行，否则单行
- */
-const fakeMeasurer: TextMeasurer = {
-  measure({ block, style, maxWidth }) {
-    const text = block.runs.map((run) => run.text).join('');
-    const fontSize = style.fontSize ?? 14;
-    const lineHeight = fontSize * (typeof style.lineHeight === 'number' ? style.lineHeight : 1.2);
-    const textWidth = text.length * fontSize * 0.5;
-    const lines = maxWidth === undefined || textWidth <= maxWidth ? 1 : Math.ceil(textWidth / maxWidth);
-    return { width: maxWidth === undefined ? textWidth : Math.min(textWidth, maxWidth), height: lines * lineHeight };
-  }
+/** 确定性字体测量器：每个码点宽 = 字号 × 0.5 (行高由排版按样式计算) */
+const fakeMeasurer: FontMeasurer = {
+  measureWidth: (text, font) => [...text].length * font.size * 0.5
 };
 
 function createEngine(): SkyNoteEngine {
-  return new SkyNoteEngine({ textMeasurer: fakeMeasurer }).use(new BasicNodesPlugin());
+  return new SkyNoteEngine({ fonts: fakeMeasurer }).use(new BasicNodesPlugin());
 }
 
 function compose(engine: SkyNoteEngine, id: string): CanvasPrimitive[] {
@@ -68,7 +58,7 @@ describe('便签', () => {
       height: STICKY_DEFAULT_SIZE
     });
     const [, text] = compose(engine, 's') as [CanvasPrimitive, TextPrimitive];
-    expect(text).toMatchObject({ height: 168, textOverflow: 'ellipsis' });
+    expect(text).toMatchObject({ height: 168, style: { textOverflow: 'ellipsis' } });
 
     const node = engine.documentStore.getNode('s')!;
     expect(isAspectLocked(node, engine.nodeTypes.get('sticky'))).toBe(true);
@@ -110,14 +100,12 @@ describe('便签', () => {
     expect(background).toMatchObject({ kind: 'rect', fill: CANVAS_PALETTE.blue, width: 200, height: 200 });
     expect(text).toMatchObject({
       kind: 'text',
-      text: 'hi',
-      fill: CANVAS_PALETTE.ink,
+      runs: [{ text: 'hi' }],
       x: 16,
       y: 16,
       width: 168,
       height: 168,
-      textAlign: 'center',
-      verticalAlign: 'middle'
+      style: { color: CANVAS_PALETTE.ink, textAlign: 'center', verticalAlign: 'middle' }
     });
   });
 });
@@ -213,8 +201,7 @@ describe('形状', () => {
       y: 12,
       width: 136,
       height: 76,
-      textOverflow: 'ellipsis',
-      verticalAlign: 'middle'
+      style: { textOverflow: 'ellipsis', verticalAlign: 'middle' }
     });
   });
 });

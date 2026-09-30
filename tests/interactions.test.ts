@@ -16,7 +16,8 @@ import {
   type OverlayChannel,
   type OverlayOptions,
   type Point,
-  type SystemCursor
+  type SystemCursor,
+  type TextInputSession
 } from '@skynote/core';
 import {
   BasicNodesPlugin,
@@ -57,6 +58,10 @@ class FakeHost implements CanvasHost, OverlayChannel {
 
   releasePointer(pointerId: number): void {
     this.captured.delete(pointerId);
+  }
+
+  openTextInput(): TextInputSession {
+    return { setCaretRect: () => {}, focus: () => {}, close: () => {} };
   }
 }
 

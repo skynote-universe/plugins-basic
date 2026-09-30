@@ -62,6 +62,7 @@ export class FreeTextNodeType implements NodeTypeDefinition {
   readonly defaultData = {};
   readonly sizingPolicy: NodeSizingPolicy = 'content-driven';
   readonly scaleContentOnCorners = true;
+  readonly removeWhenEmpty = true;
   readonly slots: NodeTextSlotDefinition[] = [
     { slot: BODY_SLOT, label: '正文', defaultStyle: { fontSize: DEFAULT_FONT_SIZE, lineHeight: 1.4 } }
   ];

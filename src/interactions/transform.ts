@@ -189,6 +189,8 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
 
   private resolveSelection(): SelectionFrame | null {
     const { session, entities, nodeTypes } = this.ctx;
+    // 画布内编辑文字时不显示控制柄：按在文字上是定位光标而不是缩放
+    if (session.textEditing) return null;
     const selected = session.selectedNodeIds;
     const targets: { node: NodeEntity; frame: WorldFrame }[] = [];
     for (const id of selected) {
@@ -403,10 +405,11 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   private onSessionChange(change: SessionChange): void {
-    if (change.toggledNodeIds.size > 0) this.selectionCache = undefined;
+    const selectionChanged = change.toggledNodeIds.size > 0 || change.textEditingChanged;
+    if (selectionChanged) this.selectionCache = undefined;
     // 平移不改变世界坐标中的控制柄，只有缩放 (控制柄屏幕尺寸固定) 需要重画
     const zoomChanged = change.viewportChanged && this.ctx.session.viewport.zoom !== this.drawnZoom;
-    if (change.toggledNodeIds.size > 0 || zoomChanged || change.themeChanged) this.redraw();
+    if (selectionChanged || zoomChanged || change.themeChanged) this.redraw();
   }
 
   private onDocumentChange(changes: DocumentChangeSet): void {
