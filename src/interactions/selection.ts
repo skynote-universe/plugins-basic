@@ -7,11 +7,15 @@
  *    二者共享按下判定，拆成两个插件就要互相探测对方状态，违反插件零感知。
  * 2. 拖拽阈值按屏幕像素判断：单击时手的微小抖动不会产生移动事务，也不会污染撤销栈。
  * 3. 一次拖拽共用一个 groupId，逐帧提交合并为一步撤销；只移动未锁定的最顶层选中节点 (后代随容器移动，ADR-114)。
- * 4. 框选选中与选框相交的根层级节点 (命中容器内部的子节点时选中其所在的根层级容器)，结果可预期；
+ * 4. 拖入拖出容器 (ADR-123)：拖动中高亮指针所在的最上层可接收子节点的容器 (acceptsChildren，排除被拖节点及其后代)，
+ *    松手时改挂到该容器，落在空白处移出到根层级；改挂与移动同组提交，一步撤销。只改挂原本位于根层级或可接收容器中的节点，
+ *    组合等不接收拖入的父节点中的子节点不会被拖出。
+ * 5. 框选选中与选框相交的根层级节点 (命中容器内部的子节点时选中其所在的根层级容器)，结果可预期；
  *    进入容器内部选择留给双击进入等后续交互。
  */
 
 import {
+  applyMatrix,
   boundsFromPoints,
   generateId,
   type CanvasPluginContext,
@@ -25,6 +29,9 @@ import {
 
 export const SELECTION_PLUGIN_ID = '@skynote/plugins-basic/selection';
 const MARQUEE_SESSION = 'selection:marquee';
+const DROP_TARGET_SESSION = 'selection:drop-target';
+/** 拖放目标高亮的屏幕线宽 */
+const DROP_TARGET_STROKE_PX = 2;
 /** 超过该屏幕距离才视为拖拽 */
 const DRAG_THRESHOLD_PX = 3;
 
@@ -40,6 +47,8 @@ type Gesture =
       wasSelected: boolean;
       dragging: boolean;
       groupId: string;
+      /** 拖动中指针所在的可接收容器；undefined 为画布根层级 */
+      dropTarget: string | undefined;
     }
   | {
       kind: 'marquee';
@@ -108,6 +117,7 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
       { groupId: gesture.groupId, label: '移动节点' }
     );
     gesture.lastWorld = e.point;
+    gesture.dropTarget = this.updateDropTarget(movable, e.point);
   }
 
   onPointerUp(e: CanvasPointerEvent): void {
@@ -117,6 +127,7 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
     if (gesture.kind === 'press' && !gesture.dragging && gesture.wasSelected) {
       this.ctx.session.setSelection({ nodeIds: [gesture.nodeId], connectorIds: [] });
     }
+    if (gesture.kind === 'press' && gesture.dragging) this.drop(gesture.dropTarget, gesture.groupId);
     this.finish(e.pointerId);
   }
 
@@ -147,7 +158,8 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
       nodeId: node.id,
       wasSelected: wasSelected && !e.modifiers.shift,
       dragging: false,
-      groupId: generateId('drag')
+      groupId: generateId('drag'),
+      dropTarget: undefined
     };
   }
 
@@ -173,9 +185,62 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
     );
   }
 
+  /** 指针所在的最上层可接收容器 (不含被拖节点及其后代)，并高亮其外框 */
+  private updateDropTarget(draggedIds: readonly string[], point: Point): string | undefined {
+    const { ctx } = this;
+    const dragged = new Set(draggedIds);
+    const target = ctx.hitTestNode(
+      point,
+      (node) =>
+        !!ctx.nodeTypes.get(node.nodeType)?.acceptsChildren &&
+        !dragged.has(node.id) &&
+        !ctx.entities.getAncestorIds(node.id).some((id) => dragged.has(id))
+    );
+    if (!target) {
+      ctx.host.overlay.clear(DROP_TARGET_SESSION);
+      return undefined;
+    }
+    const toWorld = ctx.entities.getWorldTransform(target.id)!;
+    const { theme, viewport } = ctx.session;
+    const corners = [
+      applyMatrix(toWorld, 0, 0),
+      applyMatrix(toWorld, target.width, 0),
+      applyMatrix(toWorld, target.width, target.height),
+      applyMatrix(toWorld, 0, target.height)
+    ];
+    ctx.host.overlay.setPrimitives(
+      DROP_TARGET_SESSION,
+      [
+        {
+          kind: 'polygon',
+          points: corners.flatMap((p) => [p.x, p.y]),
+          stroke: theme.accent,
+          strokeWidth: DROP_TARGET_STROKE_PX / viewport.zoom
+        }
+      ],
+      { transient: true }
+    );
+    return target.id;
+  }
+
+  /** 松手：把被拖的节点改挂到拖放目标 (保持在世界中的位置不变)，与本次移动同组撤销 */
+  private drop(targetId: string | undefined, groupId: string): void {
+    const { ctx } = this;
+    const ids = [...ctx.session.selectedNodeIds].filter((id) => {
+      const node = ctx.entities.getNode(id)?.entity;
+      if (!node || node.locked || node.parentId === targetId) return false;
+      // 原父节点不接收拖入 (如组合) 时不把子节点拖出
+      const parent = node.parentId === undefined ? undefined : ctx.entities.getNode(node.parentId)?.entity;
+      return !parent || !!ctx.nodeTypes.get(parent.nodeType)?.acceptsChildren;
+    });
+    if (ids.length === 0) return;
+    ctx.document.reparentNodes(ids, targetId, { groupId, label: targetId ? '移入容器' : '移出容器' });
+  }
+
   private finish(pointerId: number): void {
     const { host } = this.ctx;
     host.overlay.clear(MARQUEE_SESSION);
+    host.overlay.clear(DROP_TARGET_SESSION);
     host.releasePointer(pointerId);
     host.setCursor('default');
     this.gesture = null;

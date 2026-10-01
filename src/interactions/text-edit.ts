@@ -380,20 +380,28 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
 
   // ================= 进入与定位 =================
 
-  /** 双击节点进入编辑：定位到点中的文字块 (都没点中时取第一个)，光标放在点击处 */
+  /** 双击节点进入编辑：定位到点中的文字块 (都没点中时取框内的第一个)，光标放在点击处 */
   private enter(node: Readonly<NodeEntity>, point: Point): boolean {
     const blocks = this.textPrimitives(node);
     const toWorld = this.ctx.entities.getWorldTransform(node.id);
-    if (blocks.length === 0 || !toWorld || !this.ctx.document.fonts) return false;
+    const fonts = this.ctx.document.fonts;
+    if (blocks.length === 0 || !toWorld || !fonts) return false;
     const local = applyMatrix(invertMatrix(toWorld), point.x, point.y);
+    // 文字框的实际范围：未限定宽高的 (如自适应文本、画框标题) 按排版结果
+    const contains = (p: TextPrimitive): boolean => {
+      const layout =
+        p.width === undefined || p.height === undefined
+          ? layoutText(p.runs, p.style, { width: p.width, height: p.height }, fonts)
+          : null;
+      const width = p.width ?? layout!.width;
+      const height = p.height ?? layout!.height;
+      return local.x >= p.x && local.y >= p.y && local.x <= p.x + width && local.y <= p.y + height;
+    };
     const primitive =
-      blocks.find(
-        (p) =>
-          local.x >= p.x &&
-          local.y >= p.y &&
-          local.x <= p.x + (p.width ?? Infinity) &&
-          local.y <= p.y + (p.height ?? Infinity)
-      ) ?? blocks[0];
+      blocks.find(contains) ??
+      // 没点中文字时取框内的第一个文字块 (如点在便签内边距上)；框外的文字 (画框标题) 须点中才编辑
+      blocks.find((p) => p.x >= 0 && p.y >= 0);
+    if (!primitive) return false;
 
     const handler: TextInputHandler = {
       insertText: (text) => this.insertText(text),

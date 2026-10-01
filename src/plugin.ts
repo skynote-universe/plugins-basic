@@ -1,12 +1,13 @@
 /**
  * @file plugin.ts
- * @description 基础节点插件：一次注册便签、自由文本与基础形状
+ * @description 基础节点插件：一次注册便签、自由文本、基础形状与画框
  */
 
 import type { CanvasPluginContext, SkyNotePlugin } from '@skynote/core';
 import { StickyNodeType } from './nodes/sticky';
 import { FreeTextNodeType } from './nodes/free-text';
 import { ShapeNodeType } from './nodes/shapes';
+import { FrameNodeType } from './nodes/frame';
 
 export class BasicNodesPlugin implements SkyNotePlugin {
   readonly id = '@skynote/plugins-basic/nodes';
@@ -17,5 +18,6 @@ export class BasicNodesPlugin implements SkyNotePlugin {
     ctx.registerNodeType(new StickyNodeType());
     ctx.registerNodeType(new FreeTextNodeType());
     ctx.registerNodeType(new ShapeNodeType());
+    ctx.registerNodeType(new FrameNodeType());
   }
 }
