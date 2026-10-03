@@ -306,6 +306,8 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     e: CanvasPointerEvent
   ): NodeTransform[] {
     const { frame } = selection;
+
+    // 1. [局部坐标投影] 将指针位移转换至外框局部坐标系
     const toLocal = invertMatrix(computeFrameMatrix(frame));
     const p0 = applyMatrix(toLocal, start.x, start.y);
     const p = applyMatrix(toLocal, e.point.x, e.point.y);
@@ -313,6 +315,7 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     const fromCenter = e.modifiers.alt;
     const factor = fromCenter ? 2 : 1;
 
+    // 2. [缩放比例与尺寸夹取] 依据等比锁定与 Shift 修饰键换算目标宽高与缩放倍数
     let width = sign.x === 0 ? frame.width : frame.width + sign.x * (p.x - p0.x) * factor;
     let height = sign.y === 0 ? frame.height : frame.height + sign.y * (p.y - p0.y) * factor;
     const isCorner = sign.x !== 0 && sign.y !== 0;
@@ -334,7 +337,7 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
       height = Math.max(MIN_SIZE, height);
     }
 
-    // 新外框左上角 (旧外框局部坐标)：被拖动的一侧移动，对侧固定；未拖动的轴与 Alt 时以中心为准
+    // 3. [外框锚定与节点映射] 计算新外框基准点，并将各选中节点相对映射到新外框中
     const left = fromCenter || sign.x === 0 ? (frame.width - width) / 2 : sign.x > 0 ? 0 : frame.width - width;
     const top = fromCenter || sign.y === 0 ? (frame.height - height) / 2 : sign.y > 0 ? 0 : frame.height - height;
     const fromOld = computeFrameMatrix(frame);
@@ -371,11 +374,15 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
   private computeRotate(selection: SelectionFrame, start: Point, e: CanvasPointerEvent): NodeTransform[] {
     const { frame } = selection;
     const center = { x: frame.cx, y: frame.cy };
+
+    // 1. [角度差计算] 计算当前指针与起始点的极角差，处理 Shift 步进吸附
     let delta =
       ((Math.atan2(e.point.y - center.y, e.point.x - center.x) - Math.atan2(start.y - center.y, start.x - center.x)) *
         180) /
       Math.PI;
     if (e.modifiers.shift) delta = Math.round((frame.rotation + delta) / ROTATE_SNAP) * ROTATE_SNAP - frame.rotation;
+
+    // 2. [节点外框重定位] 围绕整体外框中心公转并自转每个选中的目标节点
     return selection.targets.map(({ node, frame: nodeFrame }) => {
       const c = rotatePoint({ x: nodeFrame.cx, y: nodeFrame.cy }, center, delta);
       return { id: node.id, frame: { ...nodeFrame, cx: c.x, cy: c.y, rotation: nodeFrame.rotation + delta } };
