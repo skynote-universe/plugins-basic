@@ -11,6 +11,7 @@
 
 import {
   createTextBlockPrimitive,
+  resolveLineHeightPx,
   resolveTextBlockStyle,
   type CanvasPrimitive,
   type NodeComposeContext,
@@ -29,8 +30,15 @@ const TITLE_FONT_SIZE = 14;
 const TITLE_LINE_HEIGHT = 1.4;
 /** 标题与外框的间距 */
 const TITLE_GAP = 4;
-/** 框外标题区域的高度 (标题行高 + 间距) */
-const TITLE_BAND = Math.ceil(TITLE_FONT_SIZE * TITLE_LINE_HEIGHT) + TITLE_GAP;
+
+/** 计算标题文本块的单行排版高度 (统一使用内核标准行高解析) */
+function computeTitleHeight(node: NodeEntity, definition: NodeTypeDefinition): number {
+  const title = node.textBlocks?.find((b) => b.slot === TITLE_SLOT);
+  if (!title) return 0;
+  const style = resolveTextBlockStyle(node, title, definition);
+  const fontSize = style.fontSize ?? TITLE_FONT_SIZE;
+  return Math.ceil(resolveLineHeightPx(style.lineHeight ?? TITLE_LINE_HEIGHT, fontSize));
+}
 
 export interface FrameCreateOptions {
   title?: string;
@@ -55,7 +63,14 @@ export class FrameNodeType implements NodeTypeDefinition {
     {
       slot: TITLE_SLOT,
       label: '标题',
-      defaultStyle: { fontSize: TITLE_FONT_SIZE, lineHeight: TITLE_LINE_HEIGHT, textWrap: 'none' }
+      defaultStyle: {
+        fontSize: TITLE_FONT_SIZE,
+        lineHeight: TITLE_LINE_HEIGHT,
+        textWrap: 'none',
+        overflow: 'ellipsis',
+        textOverflow: 'ellipsis',
+        editingOverflow: 'visible'
+      }
     }
   ];
 
@@ -66,16 +81,19 @@ export class FrameNodeType implements NodeTypeDefinition {
     };
   }
 
-  /** 外框上方的标题带纳入占据范围 (整条与画框同宽，标题短于画框时空白处同样可点选画框) */
+  /** 外框上方的标题带纳入占据范围 (整条与画框同宽，高度固定为单行) */
   extent(node: NodeEntity): RectBounds {
-    return { left: 0, top: -TITLE_BAND, right: node.width, bottom: node.height };
+    const titleHeight = computeTitleHeight(node, this);
+    const top = titleHeight > 0 ? -TITLE_GAP - titleHeight : -TITLE_GAP - TITLE_FONT_SIZE;
+    return { left: 0, top, right: node.width, bottom: node.height };
   }
 
+  /** 画框视觉轮廓：仅包含画框本体矩形 (悬停高亮只贴合形状，框外标题通过 extent 参与交互拾取) */
   outline(node: NodeEntity): Point[] {
     const { width: w, height: h } = node;
     return [
-      { x: 0, y: -TITLE_BAND },
-      { x: w, y: -TITLE_BAND },
+      { x: 0, y: 0 },
+      { x: w, y: 0 },
       { x: w, y: h },
       { x: 0, y: h }
     ];
@@ -93,13 +111,22 @@ export class FrameNodeType implements NodeTypeDefinition {
         fill: typeof fill === 'string' ? fill : theme.nodeFill,
         stroke: node.style?.stroke ?? theme.nodeStroke,
         strokeWidth: node.style?.strokeWidth ?? 1,
+        strokeDashArray: node.style?.strokeDashArray,
         radius: node.style?.radius ?? 4
       }
     ];
     const title = node.textBlocks?.find((b) => b.slot === TITLE_SLOT);
     if (title) {
+      const titleHeight = computeTitleHeight(node, this);
+      const titleY = titleHeight > 0 ? -TITLE_GAP - titleHeight : -TITLE_GAP - TITLE_FONT_SIZE;
+      const titleStyle = { ...resolveTextBlockStyle(node, title, this), fontSize: TITLE_FONT_SIZE };
       primitives.push(
-        createTextBlockPrimitive(title, resolveTextBlockStyle(node, title, this), { x: 0, y: -TITLE_BAND })
+        createTextBlockPrimitive(title, titleStyle, {
+          x: 0,
+          y: titleY,
+          width: node.width,
+          height: titleHeight > 0 ? titleHeight : undefined
+        })
       );
     }
     return primitives;

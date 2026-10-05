@@ -68,6 +68,17 @@ const HANDLE_SIGNS: Record<ResizeHandle, { x: -1 | 0 | 1; y: -1 | 0 | 1 }> = {
 };
 /** 按屏幕方向角 (0° 为向右，每 45° 一档) 取缩放光标 */
 const RESIZE_CURSORS: readonly SystemCursor[] = ['ew-resize', 'nwse-resize', 'ns-resize', 'nesw-resize'];
+/** 8 档方向角旋转光标 (0° ~ 315°，步长 45°) */
+const ROTATE_CURSORS: readonly SystemCursor[] = [
+  'rotate-0',
+  'rotate-45',
+  'rotate-90',
+  'rotate-135',
+  'rotate-180',
+  'rotate-225',
+  'rotate-270',
+  'rotate-315'
+];
 
 /** 当前选区的变换外框 */
 interface SelectionFrame {
@@ -89,9 +100,16 @@ type Gesture =
       selection: SelectionFrame;
       groupId: string;
     }
-  | { kind: 'rotate'; pointerId: number; start: Point; selection: SelectionFrame; groupId: string };
+  | {
+      kind: 'rotate';
+      pointerId: number;
+      corner: ResizeHandle;
+      start: Point;
+      selection: SelectionFrame;
+      groupId: string;
+    };
 
-type HandleHit = { kind: 'resize'; handle: ResizeHandle } | { kind: 'rotate' };
+type HandleHit = { kind: 'resize'; handle: ResizeHandle } | { kind: 'rotate'; corner: ResizeHandle };
 
 function rotatePoint(point: Point, center: Point, degrees: number): Point {
   const rad = (degrees * Math.PI) / 180;
@@ -146,6 +164,9 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
       selection: snapshot,
       groupId: generateId('transform')
     };
+    if (hit.kind === 'rotate') {
+      this.ctx.host.setCursor('default');
+    }
   }
 
   onPointerMove(e: CanvasPointerEvent): void {
@@ -288,7 +309,7 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     const rotateZone = ROTATE_ZONE_PX / zoom;
     for (const corner of CORNERS) {
       const p = this.handlePosition(frame, corner);
-      if (Math.hypot(local.x - p.x, local.y - p.y) <= rotateZone) return { kind: 'rotate' };
+      if (Math.hypot(local.x - p.x, local.y - p.y) <= rotateZone) return { kind: 'rotate', corner };
     }
     return null;
   }
@@ -337,6 +358,15 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
       height = Math.max(MIN_SIZE, height);
     }
 
+    // 像素对齐约束：当外框无旋转时，四舍五入为纯整数像素尺寸
+    if (frame.rotation === 0) {
+      width = Math.max(MIN_SIZE, Math.round(width));
+      height = Math.max(MIN_SIZE, Math.round(height));
+      if (uniform && frame.width > 0) {
+        scale = width / frame.width;
+      }
+    }
+
     // 3. [外框锚定与节点映射] 计算新外框基准点，并将各选中节点相对映射到新外框中
     const left = fromCenter || sign.x === 0 ? (frame.width - width) / 2 : sign.x > 0 ? 0 : frame.width - width;
     const top = fromCenter || sign.y === 0 ? (frame.height - height) / 2 : sign.y > 0 ? 0 : frame.height - height;
@@ -350,11 +380,21 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
       const c = applyMatrix(toLocal, nodeFrame.cx, nodeFrame.cy);
       const center = applyMatrix(fromOld, left + c.x * kx, top + c.y * ky);
       const single = selection.targets.length === 1;
+      const targetWidth = single
+        ? width
+        : frame.rotation === 0
+          ? Math.round(nodeFrame.width * kx)
+          : nodeFrame.width * kx;
+      const targetHeight = single
+        ? height
+        : frame.rotation === 0
+          ? Math.round(nodeFrame.height * ky)
+          : nodeFrame.height * ky;
       const nextFrame: WorldFrame = {
         cx: center.x,
         cy: center.y,
-        width: single ? width : nodeFrame.width * kx,
-        height: single ? height : nodeFrame.height * ky,
+        width: targetWidth,
+        height: targetHeight,
         rotation: nodeFrame.rotation
       };
       const fields = nodeTypes.get(node.nodeType)?.applyResize?.(node, {
@@ -402,7 +442,11 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     }
     this.hoverCursorSet = true;
     if (hit.kind === 'rotate') {
-      this.ctx.host.setCursor('crosshair');
+      const center = { x: selection.frame.cx, y: selection.frame.cy };
+      const pointerAngle = (Math.atan2(e.point.y - center.y, e.point.x - center.x) * 180) / Math.PI;
+      const relAngle = pointerAngle - 180;
+      const step = ((Math.round(relAngle / 45) % 8) + 8) % 8;
+      this.ctx.host.setCursor(ROTATE_CURSORS[step]);
       return;
     }
     const sign = HANDLE_SIGNS[hit.handle];

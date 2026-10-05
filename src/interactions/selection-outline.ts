@@ -11,6 +11,8 @@
 
 import {
   applyMatrix,
+  computeTextLayout,
+  replaceText,
   type CanvasPluginContext,
   type CanvasPointerEvent,
   type CanvasPrimitive,
@@ -18,7 +20,8 @@ import {
   type NodeEntity,
   type PointerHooks,
   type SessionChange,
-  type SkyNotePlugin
+  type SkyNotePlugin,
+  type TextEditingTarget
 } from '@skynote/core';
 
 export const SELECTION_OUTLINE_PLUGIN_ID = '@skynote/plugins-basic/selection-outline';
@@ -99,7 +102,9 @@ export class SelectionOutlinePlugin implements SkyNotePlugin, PointerHooks {
     if (this.hoveredId && (change.viewportChanged || this.ctx.session.selectedNodeIds.has(this.hoveredId))) {
       this.setHover(null);
     }
-    if (change.toggledNodeIds.size > 0 || zoomChanged || change.themeChanged) this.redraw();
+    if (change.toggledNodeIds.size > 0 || zoomChanged || change.themeChanged || change.textEditingChanged) {
+      this.redraw();
+    }
   }
 
   private onDocumentChange(changes: DocumentChangeSet): void {
@@ -116,13 +121,27 @@ export class SelectionOutlinePlugin implements SkyNotePlugin, PointerHooks {
   }
 
   private redraw(): void {
-    const { session, entities, host } = this.ctx;
+    const { session, entities, host, nodeTypes } = this.ctx;
+    const fonts = this.ctx.document.fonts;
     this.drawnZoom = session.viewport.zoom;
     const primitives: CanvasPrimitive[] = [];
     for (const id of session.selectedNodeIds) {
       const runtimeNode = entities.getNode(id);
       if (!runtimeNode) continue;
-      const { width, height } = runtimeNode.entity;
+      const { entity } = runtimeNode;
+      let { width, height } = entity;
+
+      // 若节点正在进行画布内文本编辑，且处于输入法组合输入等未提交状态，按包含组合文字的排版尺寸动态绘制外框
+      const editing = session.textEditing?.nodeId === id ? session.textEditing : null;
+      if (editing?.composition && fonts) {
+        const previewNode = this.nodeWithComposition(entity, editing);
+        const layoutSize = computeTextLayout(previewNode, nodeTypes.get(entity.nodeType), fonts);
+        if (layoutSize) {
+          width = layoutSize.width;
+          height = layoutSize.height;
+        }
+      }
+
       const m = entities.getWorldTransform(id)!;
       const corners = [
         applyMatrix(m, 0, 0),
@@ -139,5 +158,17 @@ export class SelectionOutlinePlugin implements SkyNotePlugin, PointerHooks {
       });
     }
     host.overlay.setPrimitives(OUTLINE_SESSION, primitives);
+  }
+
+  /** 将未落盘的输入法组合文字临时注入节点模型，供排版引擎预览外框尺寸 */
+  private nodeWithComposition(node: Readonly<NodeEntity>, editing: TextEditingTarget): NodeEntity {
+    const { composition } = editing;
+    if (!composition || !node.textBlocks) return node as NodeEntity;
+    const textBlocks = node.textBlocks.map((block) => {
+      if (block.id !== editing.blockId) return block;
+      const runs = replaceText(block.runs, composition.offset, composition.offset, composition.text, composition.style);
+      return { ...block, runs };
+    });
+    return { ...node, textBlocks };
   }
 }

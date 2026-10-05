@@ -166,8 +166,25 @@ describe('自由文本', () => {
     expect(fitted.explicitWidth).toBeUndefined();
     expect(fitted.explicitHeight).toBeUndefined();
     // 'hello' 18px：宽 5 × 9，单行高 18 × 1.4
-    expect(store.getNode('t')).toMatchObject({ width: 45, height: Math.ceil(18 * 1.4) });
     expect(store.canFitContent('t')).toBe(false);
+  });
+
+  it('自由文本等比缩放时字号四舍五入取整，固定宽高同样整数化 (无小数点)', () => {
+    const engine = createEngine();
+    const store = engine.documentStore;
+    store.createNode({ nodeType: 'free-text', id: 't', x: 0, y: 0, options: { text: 'hello' } });
+    const node = store.getNode('t')!;
+    const def = engine.nodeTypes.get('free-text')!;
+
+    // 模拟拖角缩放 1.13 倍 (原本 18px * 1.13 = 20.34px -> 应四舍五入为 20px)
+    const resized = def.applyResize!(node, { handle: 'se', width: 50.85, height: 28.25, scale: 1.13 });
+    const block = resized.textBlocks?.[0];
+    expect(block?.style?.fontSize).toBe(20);
+
+    // 模拟左右拉边改变宽度，传入浮点宽度 -> 应 Math.round 整数化
+    const sideResized = def.applyResize!(node, { handle: 'e', width: 145.38, height: 26, scale: 1 });
+    const sideBlock = sideResized.textBlocks?.[0];
+    expect(sideBlock?.explicitWidth).toBe(145);
   });
 });
 
@@ -203,5 +220,29 @@ describe('形状', () => {
       height: 76,
       style: { textOverflow: 'ellipsis', verticalAlign: 'middle' }
     });
+  });
+});
+
+describe('画框', () => {
+  it('标题固定为单行且宽度等于画框宽度，超长支持省略，底部距画框 4px', () => {
+    const engine = createEngine();
+    engine.documentStore.createNode({
+      nodeType: 'frame',
+      id: 'f1',
+      x: 0,
+      y: 0,
+      width: 480,
+      height: 320,
+      options: { title: '画框标题' }
+    });
+    const [, t1] = compose(engine, 'f1') as [CanvasPrimitive, TextPrimitive];
+    expect(t1.y).toBe(-24);
+    expect(t1.width).toBe(480);
+    expect(t1.height).toBe(20);
+    expect(t1.style.textOverflow).toBe('ellipsis');
+    expect(t1.style.overflow).toBe('ellipsis');
+    expect(t1.style.editingOverflow).toBe('visible');
+    const def = engine.nodeTypes.get('frame')!;
+    expect(def.extent!(engine.documentStore.getNode('f1')!)).toMatchObject({ top: -24, right: 480 });
   });
 });

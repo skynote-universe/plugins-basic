@@ -369,6 +369,67 @@ describe('选中框', () => {
     expect(overlay.has('selection:outline')).toBe(false);
     expect(engine.plugins.get(SELECTION_PLUGIN_ID)).toBeDefined();
   });
+
+  it('编辑中的自适应文本在输入法组合态下，选中外框跟随组合排版尺寸动态伸缩 (防止内容溢出)', () => {
+    const { engine, overlay } = setup();
+    engine.documentStore.setFontMeasurer({ measureWidth: (text, font) => [...text].length * font.size * 0.5 });
+    engine.documentStore.createNode({ nodeType: 'free-text', id: 't', x: 0, y: 0, options: { text: '文本' } });
+
+    engine.session.setSelection({ nodeIds: ['t'] });
+    let outline = overlay.get('selection:outline')!;
+    const initialPoints = (outline.primitives[0] as { points: number[] }).points;
+    const initialWidth = initialPoints[2] - initialPoints[0];
+
+    // 模拟正在输入法中输入拼音：会话中设置 composition
+    engine.session.setTextEditing({
+      nodeId: 't',
+      blockId: 'body',
+      scrollY: 0,
+      composition: { offset: 1, text: "s's'd'd's", style: {} }
+    });
+
+    outline = overlay.get('selection:outline')!;
+    const composingPoints = (outline.primitives[0] as { points: number[] }).points;
+    const composingWidth = composingPoints[2] - composingPoints[0];
+
+    // 包含拼音后的外框宽度必须明显大于初始宽度，杜绝内容溢出
+    expect(composingWidth).toBeGreaterThan(initialWidth);
+
+    // 退出编辑后，外框重置回实体尺寸
+    engine.session.setTextEditing(null);
+    outline = overlay.get('selection:outline')!;
+    const finalPoints = (outline.primitives[0] as { points: number[] }).points;
+    expect(finalPoints[2] - finalPoints[0]).toBe(initialWidth);
+  });
+
+  it('画框外部标题保留交互可点选，但悬停高亮框仅贴合画框本体形状 (不包含外部标题)', () => {
+    const { engine, overlay } = setup();
+    // 创建一个位于 (100, 100)，尺寸 480x320 的画框
+    engine.documentStore.createNode({
+      nodeType: 'frame',
+      id: 'f1',
+      x: 100,
+      y: 100,
+      width: 480,
+      height: 320,
+      options: { title: '测试画框' }
+    });
+
+    // 1. 鼠标悬停在画框头顶外的标题区域 (y=90 在标题带 100 - TITLE_BAND 内)
+    pointer(engine, 'move', { x: 150, y: 90 });
+    expect(overlay.has('selection:hover')).toBe(true);
+
+    const hoverPrimitives = overlay.get('selection:hover')!.primitives;
+    expect(hoverPrimitives).toHaveLength(1);
+    const hoverPoints = (hoverPrimitives[0] as { points: number[] }).points;
+    // 悬停框的顶部世界坐标严格贴合画框顶部 y=100，绝不包含上方的标题带 (不突起到负值/上方)
+    const minY = Math.min(hoverPoints[1], hoverPoints[3], hoverPoints[5], hoverPoints[7]);
+    expect(minY).toBe(100);
+
+    // 2. 点击外部标题区域，画框依然能够被成功选中并触发交互
+    click(engine, { x: 150, y: 90 });
+    expect(engine.session.selectedNodeIds.has('f1')).toBe(true);
+  });
 });
 
 /** 单击选中 (视口为单位矩阵时屏幕坐标即世界坐标) */

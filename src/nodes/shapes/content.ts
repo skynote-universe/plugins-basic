@@ -39,12 +39,15 @@ interface OutlineStyle {
   stroke: string;
   strokeWidth: number;
   radius: NodeStyle['radius'];
+  strokeDashArray?: number[];
+  strokeCap?: NodeStyle['strokeCap'];
+  strokeJoin?: NodeStyle['strokeJoin'];
 }
 
 /** 形状轮廓：只描述几何，颜色与线宽统一由样式传入 */
 const GEOMETRY_BUILDERS: Record<ShapeGeometry, (w: number, h: number, style: OutlineStyle) => CanvasPrimitive> = {
   rectangle: (w, h, style) => ({ kind: 'rect', x: 0, y: 0, width: w, height: h, ...style }),
-  ellipse: (w, h, { fill, stroke, strokeWidth }) => ({
+  ellipse: (w, h, { fill, stroke, strokeWidth, strokeDashArray, strokeCap, strokeJoin }) => ({
     kind: 'ellipse',
     cx: w / 2,
     cy: h / 2,
@@ -52,15 +55,20 @@ const GEOMETRY_BUILDERS: Record<ShapeGeometry, (w: number, h: number, style: Out
     ry: h / 2,
     fill,
     stroke,
-    strokeWidth
+    strokeWidth,
+    strokeDashArray,
+    strokeCap,
+    strokeJoin
   }),
-  diamond: (w, h, { fill, stroke, strokeWidth }) => ({
+  diamond: (w, h, { fill, stroke, strokeWidth, strokeDashArray, strokeCap, strokeJoin }) => ({
     kind: 'polygon',
     points: [w / 2, 0, w, h / 2, w / 2, h, 0, h / 2],
     fill,
     stroke,
     strokeWidth,
-    strokeJoin: 'round'
+    strokeJoin: strokeJoin ?? 'round',
+    strokeDashArray,
+    strokeCap
   })
 };
 
@@ -128,15 +136,13 @@ export class ShapeNodeType implements NodeTypeDefinition {
     }
   ];
 
-  /** 新形状：默认矩形；给出 label 时才带标签文本块 */
+  /** 新形状：默认矩形；默认带标签文本块以便双击编辑 */
   createContent(options: ShapeCreateOptions): NodeCreateContent {
     return {
       width: SHAPE_DEFAULT_SIZE.width,
       height: SHAPE_DEFAULT_SIZE.height,
       data: { geometry: options.geometry ?? 'rectangle' },
-      ...(options.label !== undefined && {
-        textBlocks: [{ id: LABEL_SLOT, slot: LABEL_SLOT, runs: [{ text: options.label }] }]
-      })
+      textBlocks: [{ id: LABEL_SLOT, slot: LABEL_SLOT, runs: [{ text: options.label ?? '' }] }]
     };
   }
 
@@ -150,7 +156,10 @@ export class ShapeNodeType implements NodeTypeDefinition {
       fill: typeof style?.fill === 'string' ? style.fill : theme.nodeFill,
       stroke: style?.stroke ?? theme.nodeStroke,
       strokeWidth: style?.strokeWidth ?? DEFAULT_STROKE_WIDTH,
-      radius: style?.radius
+      radius: style?.radius,
+      strokeDashArray: style?.strokeDashArray,
+      strokeCap: style?.strokeCap,
+      strokeJoin: style?.strokeJoin
     });
     const primitives: CanvasPrimitive[] = [shape];
 

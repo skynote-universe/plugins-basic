@@ -64,7 +64,11 @@ export class FreeTextNodeType implements NodeTypeDefinition {
   readonly scaleContentOnCorners = true;
   readonly removeWhenEmpty = true;
   readonly slots: NodeTextSlotDefinition[] = [
-    { slot: BODY_SLOT, label: '正文', defaultStyle: { fontSize: DEFAULT_FONT_SIZE, lineHeight: 1.4 } }
+    {
+      slot: BODY_SLOT,
+      label: '正文',
+      defaultStyle: { fontSize: DEFAULT_FONT_SIZE, lineHeight: 1.4, textOverflow: 'ellipsis' }
+    }
   ];
 
   /** 初始宽高为 0：注入文本测量器时，提交事务内即派生出实际尺寸 (ADR-105) */
@@ -98,18 +102,23 @@ export class FreeTextNodeType implements NodeTypeDefinition {
       return withBody(node, {
         ...block,
         sizing: block.sizing === 'fixed' ? 'fixed' : 'auto-height',
-        explicitWidth: width
+        explicitWidth: Math.round(width)
       });
     }
     if (scale === 1 && (handle === 'n' || handle === 's')) {
-      return withBody(node, { ...block, sizing: 'fixed', explicitWidth: width, explicitHeight: height });
+      return withBody(node, {
+        ...block,
+        sizing: 'fixed',
+        explicitWidth: Math.round(width),
+        explicitHeight: Math.round(height)
+      });
     }
     const fontSize = resolveTextBlockStyle(node, block, this).fontSize ?? DEFAULT_FONT_SIZE;
     return withBody(node, {
       ...block,
-      style: { ...block.style, fontSize: Math.max(MIN_FONT_SIZE, Math.round(fontSize * scale * 100) / 100) },
-      ...(block.explicitWidth !== undefined && { explicitWidth: block.explicitWidth * scale }),
-      ...(block.explicitHeight !== undefined && { explicitHeight: block.explicitHeight * scale })
+      style: { ...block.style, fontSize: Math.max(MIN_FONT_SIZE, Math.round(fontSize * scale)) },
+      ...(block.explicitWidth !== undefined && { explicitWidth: Math.round(block.explicitWidth * scale) }),
+      ...(block.explicitHeight !== undefined && { explicitHeight: Math.round(block.explicitHeight * scale) })
     });
   }
 

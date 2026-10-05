@@ -169,6 +169,55 @@ describe('进入与退出', () => {
     press(engine, { x: 600, y: 600 });
     expect(engine.session.textEditing).toBeNull();
   });
+
+  it('形状节点 (矩形、椭圆、菱形) 双击可直接进入编辑并输入文本标签', () => {
+    const context = setup();
+    const { engine, host, store } = context;
+    // 默认创建矩形 (未显式传 label)
+    store.createNode({ nodeType: 'shape', id: 'rect1', x: 200, y: 200 });
+    press(engine, { x: 250, y: 250 });
+    press(engine, { x: 250, y: 250 }, 2);
+
+    expect(engine.session.textEditing).toMatchObject({ nodeId: 'rect1', blockId: 'label' });
+    expect(host.inputOpen).toBe(true);
+
+    host.handler!.insertText('矩形文本');
+    expect(store.getNode('rect1')!.textBlocks![0].runs[0].text).toBe('矩形文本');
+
+    key(engine, 'Escape');
+    expect(engine.session.textEditing).toBeNull();
+    expect(store.getNode('rect1')!.textBlocks![0].runs[0].text).toBe('矩形文本');
+  });
+
+  it('老数据或未初始化 textBlocks 的形状节点，双击自动补齐文本块并进入编辑', () => {
+    const context = setup();
+    const { engine, host, store } = context;
+    // 模拟老节点，无 textBlocks 字段
+    store.addNode({
+      id: 'legacy-rect',
+      type: 'node',
+      nodeType: 'shape',
+      x: 300,
+      y: 300,
+      width: 160,
+      height: 100,
+      rotation: 0,
+      zIndex: 'a0',
+      locked: false,
+      data: { geometry: 'rectangle' }
+    });
+    expect(store.getNode('legacy-rect')!.textBlocks).toBeUndefined();
+
+    press(engine, { x: 350, y: 350 });
+    press(engine, { x: 350, y: 350 }, 2);
+
+    expect(engine.session.textEditing).toMatchObject({ nodeId: 'legacy-rect', blockId: 'label' });
+    expect(host.inputOpen).toBe(true);
+    expect(store.getNode('legacy-rect')!.textBlocks).toBeDefined();
+
+    host.handler!.insertText('自愈文本');
+    expect(store.getNode('legacy-rect')!.textBlocks![0].runs[0].text).toBe('自愈文本');
+  });
 });
 
 describe('删空即删除', () => {
@@ -420,5 +469,179 @@ describe('段落对齐与格式目标', () => {
     store.undo();
     store.undo();
     expect(runs()).toEqual([{ text: 'hello world' }]);
+  });
+
+  it('编辑态下多次格式调整 (如改字色、改底色) 独立成步，可逐级撤销', () => {
+    const context = setup();
+    const { engine, plugin, store, runs } = context;
+    enterAt(context, 0);
+
+    // 1. 设置文字颜色为红色
+    key(engine, 'a', { ctrlKey: true });
+    plugin.applyStyle({ color: '$red' });
+    expect(runs()[0].color).toBe('$red');
+
+    // 2. 设置高亮底色为黄色
+    plugin.applyStyle({ backgroundColor: '$yellow' });
+    expect(runs()[0].color).toBe('$red');
+    expect(runs()[0].backgroundColor).toBe('$yellow');
+
+    // 3. 第一次撤销：只回退底色，保留红色文字
+    store.undo();
+    expect(runs()[0].color).toBe('$red');
+    expect(runs()[0].backgroundColor).toBeUndefined();
+
+    // 4. 第二次撤销：回退字体颜色，回到最初状态
+    store.undo();
+    expect(runs()[0].color).toBeUndefined();
+    expect(runs()[0].backgroundColor).toBeUndefined();
+  });
+
+  it('编辑态下 formatState 暴露当前编辑文本块的屏幕包围盒 screenBounds', () => {
+    const context = setup();
+    const { plugin } = context;
+    expect(plugin.formatState?.screenBounds).toBeUndefined();
+
+    enterAt(context, 0);
+    expect(plugin.formatState?.editing).toBe(true);
+    const bounds = plugin.formatState?.screenBounds;
+    expect(bounds).toBeDefined();
+    // 节点在 x: 100, y: 100 处，屏幕包围盒应覆盖该区域
+    expect(bounds!.left).toBeCloseTo(100, 0);
+    expect(bounds!.top).toBeCloseTo(100, 0);
+    expect(bounds!.right).toBeGreaterThan(100);
+    expect(bounds!.bottom).toBeGreaterThan(100);
+  });
+
+  it('画框外部标题栏双击能正确进入编辑，编辑中按 Enter 直接确认退出', () => {
+    const context = setup();
+    const { engine, store } = context;
+    store.createNode({
+      nodeType: 'frame',
+      id: 'f1',
+      x: 200,
+      y: 200,
+      width: 480,
+      height: 320,
+      options: { title: 'FrameTitle' }
+    });
+
+    // 标题区域在 y = 200 - 24 = 176 到 200 之间；双击该区域
+    const titlePoint: Point = { x: 260, y: 185 };
+    press(engine, titlePoint, 1);
+    press(engine, titlePoint, 2);
+
+    expect(engine.session.textEditing).toMatchObject({
+      nodeId: 'f1',
+      blockId: 'title'
+    });
+
+    // 单行标题在编辑中按 Enter 直接提交并退出编辑
+    key(engine, 'Enter');
+    expect(engine.session.textEditing).toBeNull();
+  });
+
+  it('画框外部标题在编辑状态下，拖拽选择文本正常保持编辑态且不会移动节点', () => {
+    const context = setup();
+    const { engine, store } = context;
+    store.createNode({
+      nodeType: 'frame',
+      id: 'f1',
+      x: 200,
+      y: 200,
+      width: 480,
+      height: 320,
+      options: { title: 'FrameLongTitle' }
+    });
+
+    const titlePoint: Point = { x: 260, y: 185 };
+    press(engine, titlePoint, 1);
+    press(engine, titlePoint, 2);
+    expect(engine.session.textEditing).toMatchObject({ nodeId: 'f1', blockId: 'title' });
+
+    // 在标题区域按下指针并拖拽选择文字
+    const init = {
+      point: { x: 220, y: 185 },
+      clickCount: 1,
+      modifiers: { shift: false },
+      target: engine.hitTestNode({ x: 220, y: 185 }) as NodeEntity | undefined
+    };
+    engine.pointer.dispatchPointerDown(new SyntheticPointerEvent(init));
+    // 依然在编辑态，没有被退出
+    expect(engine.session.textEditing).not.toBeNull();
+
+    // 拖动指针
+    engine.pointer.dispatchPointerMove(new SyntheticPointerEvent({ ...init, point: { x: 280, y: 185 } }));
+    engine.pointer.dispatchPointerUp(new SyntheticPointerEvent({ ...init, point: { x: 280, y: 185 } }));
+
+    // 确认画框本体位置依然未被拖动 (x: 200, y: 200)
+    const frame = store.getNode('f1')!;
+    expect(frame.x).toBe(200);
+    expect(frame.y).toBe(200);
+    expect(engine.session.textEditing).toMatchObject({ nodeId: 'f1', blockId: 'title' });
+  });
+
+  it('画框标题文本超长溢出画框宽度后，在溢出部分点击与拖选依然保持编辑态', () => {
+    const { engine, store } = setup();
+    store.createNode({
+      id: 'f2',
+      nodeType: 'frame',
+      x: 100,
+      y: 100,
+      width: 100, // 较窄的画框
+      height: 100,
+      options: { title: 'VeryVeryVeryVeryLongTitle' }
+    });
+
+    const titlePoint: Point = { x: 120, y: 85 };
+    press(engine, titlePoint, 1);
+    press(engine, titlePoint, 2);
+    expect(engine.session.textEditing).toMatchObject({ nodeId: 'f2', blockId: 'title' });
+
+    // 在超出画框宽度 (100 + 100 = 200) 的溢出文字区域点击 (x: 230)
+    const overflowPoint: Point = { x: 230, y: 85 };
+    const init = {
+      point: overflowPoint,
+      clickCount: 1,
+      modifiers: { shift: false },
+      target: engine.hitTestNode(overflowPoint) as NodeEntity | undefined
+    };
+    engine.pointer.dispatchPointerDown(new SyntheticPointerEvent(init));
+    // 依然在编辑态，没有被退出
+    expect(engine.session.textEditing).toMatchObject({ nodeId: 'f2', blockId: 'title' });
+
+    engine.pointer.dispatchPointerMove(new SyntheticPointerEvent({ ...init, point: { x: 250, y: 85 } }));
+    engine.pointer.dispatchPointerUp(new SyntheticPointerEvent({ ...init, point: { x: 250, y: 85 } }));
+
+    const frame = store.getNode('f2')!;
+    expect(frame.x).toBe(100);
+    expect(frame.y).toBe(100);
+    expect(engine.session.textEditing).toMatchObject({ nodeId: 'f2', blockId: 'title' });
+  });
+
+  it('未编辑时选中画框不弹出文字格式条，双击编辑画框标题时 resizableFont 为 false', () => {
+    const { engine, store, plugin } = setup();
+    store.createNode({
+      id: 'f3',
+      nodeType: 'frame',
+      x: 50,
+      y: 50,
+      width: 200,
+      height: 200,
+      options: { title: 'Frame3' }
+    });
+
+    // 选中画框本体
+    engine.session.setSelection({ nodeIds: ['f3'] });
+    expect(plugin.formatState).toBeNull();
+
+    // 双击进入标题编辑态
+    const titlePoint: Point = { x: 70, y: 35 };
+    press(engine, titlePoint, 1);
+    press(engine, titlePoint, 2);
+    expect(engine.session.textEditing).toMatchObject({ nodeId: 'f3', blockId: 'title' });
+    expect(plugin.formatState).not.toBeNull();
+    expect(plugin.formatState?.editing).toBe(true);
+    expect(plugin.formatState?.resizableFont).toBe(false);
   });
 });

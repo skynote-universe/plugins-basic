@@ -71,6 +71,7 @@ import {
   type TextInputSession,
   type TextLayout,
   type TextPrimitive,
+  type RectBounds,
   type VerticalAlign
 } from '@skynote/core';
 import { blockRunStyle, commonStyle, formatPatch, isFormatActive, type TextFormat } from './text-format';
@@ -119,6 +120,10 @@ export interface TextFormatState {
   readonly verticalAlign: VerticalAlign | undefined;
   /** 目标中有固定高度的文字块 (便签、形状标签)：垂直对齐对它们有效 */
   readonly verticalAlignable: boolean;
+  /** 是否允许调节字号 (画框标题等固定尺寸标示为 false) */
+  readonly resizableFont?: boolean;
+  /** 当前编辑文字块在视口中的屏幕包围盒 (未编辑时为 undefined) */
+  readonly screenBounds?: RectBounds;
 }
 
 interface EditState {
@@ -135,7 +140,8 @@ interface EditState {
   composition: TextComposition | null;
   /** 文字超出文本框时的滚动距离 */
   scrollY: number;
-  readonly groupId: string;
+  /** 打字输入的撤销组标识：每次调整格式后刷新，确保格式操作与后续打字独立撤销 */
+  groupId: string;
   readonly input: TextInputSession;
   readonly disposeScope: () => void;
 }
@@ -224,12 +230,54 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     const aligns = new Set(blocks.map((b) => this.alignAt(b)));
     const fixed = blocks.filter((b) => b.fixedHeight);
     const verticalAligns = new Set(fixed.map((b) => b.blockStyle.verticalAlign ?? 'top'));
+
+    const geometry = state ? this.geometry(state) : null;
+    let screenBounds: RectBounds | undefined;
+    if (state && geometry) {
+      const { primitive, layout, toWorld } = geometry;
+      const isVisibleOverflow =
+        (primitive.style.editingOverflow ?? (primitive.style.textWrap === 'none' ? 'visible' : 'scroll')) === 'visible';
+      const width = isVisibleOverflow
+        ? Math.max(primitive.width ?? 0, layout.width)
+        : (primitive.width ?? layout.width);
+      const height = isVisibleOverflow
+        ? Math.max(primitive.height ?? 0, layout.height)
+        : (primitive.height ?? layout.height);
+      const localCorners: Point[] = [
+        { x: primitive.x, y: primitive.y },
+        { x: primitive.x + width, y: primitive.y },
+        { x: primitive.x + width, y: primitive.y + height },
+        { x: primitive.x, y: primitive.y + height }
+      ];
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (let i = 0; i < localCorners.length; i++) {
+        const pt = localCorners[i];
+        const w = applyMatrix(toWorld, pt.x, pt.y);
+        if (w.x < minX) minX = w.x;
+        if (w.y < minY) minY = w.y;
+        if (w.x > maxX) maxX = w.x;
+        if (w.y > maxY) maxY = w.y;
+      }
+      const { viewport } = this.ctx.session;
+      const topLeft = worldToScreen({ x: minX, y: minY }, viewport);
+      const bottomRight = worldToScreen({ x: maxX, y: maxY }, viewport);
+      screenBounds = { left: topLeft.x, top: topLeft.y, right: bottomRight.x, bottom: bottomRight.y };
+    }
+
+    const isFrameTitle =
+      state !== null && state.blockId === 'title' && this.ctx.document.getNode(state.nodeId)?.nodeType === 'frame';
+
     return {
       editing: state !== null,
       style: typing ? mergeStyle(style, typing) : style,
       align: aligns.size === 1 ? [...aligns][0] : undefined,
       verticalAlign: verticalAligns.size === 1 ? [...verticalAligns][0] : undefined,
-      verticalAlignable: fixed.length > 0
+      verticalAlignable: fixed.length > 0,
+      resizableFont: !isFrameTitle,
+      screenBounds
     };
   }
 
@@ -299,8 +347,11 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
         value: { ...b.ownStyle, verticalAlign }
       }));
     if (patches.length === 0) return;
-    this.ctx.document.commit({ label: '垂直对齐', groupId: this.state?.groupId, patches });
-    if (this.state) this.refresh(false);
+    this.ctx.document.commit({ label: '垂直对齐', patches });
+    if (this.state) {
+      this.state.groupId = generateId('text-edit');
+      this.refresh(false);
+    }
   }
 
   /** 退出编辑 (保留节点选中) */
@@ -382,10 +433,34 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
 
   /** 双击节点进入编辑：定位到点中的文字块 (都没点中时取框内的第一个)，光标放在点击处 */
   private enter(node: Readonly<NodeEntity>, point: Point): boolean {
-    const blocks = this.textPrimitives(node);
+    let blocks = this.textPrimitives(node);
     const toWorld = this.ctx.entities.getWorldTransform(node.id);
     const fonts = this.ctx.document.fonts;
-    if (blocks.length === 0 || !toWorld || !fonts) return false;
+    if (!toWorld || !fonts) return false;
+
+    const groupId = generateId('text-edit');
+    if (blocks.length === 0) {
+      // 节点暂无文字块：若声明了插槽 (如形状节点的 label)，自动补齐空文字块并与编辑同组撤销
+      const definition = this.ctx.nodeTypes.get(node.nodeType);
+      const defaultSlot = definition?.slots?.[0];
+      if (!defaultSlot) return false;
+      const newBlock: TextBlock = {
+        id: defaultSlot.slot,
+        slot: defaultSlot.slot,
+        runs: [{ text: '' }]
+      };
+      this.ctx.document.updateNode(
+        node.id,
+        { textBlocks: [...(node.textBlocks ?? []), newBlock] },
+        { label: '编辑文字', groupId }
+      );
+      const updated = this.ctx.document.getNode(node.id);
+      if (!updated) return false;
+      blocks = this.textPrimitives(updated);
+      if (blocks.length === 0) return false;
+      node = updated;
+    }
+
     const local = applyMatrix(invertMatrix(toWorld), point.x, point.y);
     // 文字框的实际范围：未限定宽高的 (如自适应文本、画框标题) 按排版结果
     const contains = (p: TextPrimitive): boolean => {
@@ -397,10 +472,15 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       const height = p.height ?? layout!.height;
       return local.x >= p.x && local.y >= p.y && local.x <= p.x + width && local.y <= p.y + height;
     };
+    const definition = this.ctx.nodeTypes.get(node.nodeType);
+    const ext = definition?.extent?.(node as NodeEntity);
+    // 若点击落在框外扩展区域 (如画框标题带)，且有框外文本块，优先匹配框外文本块
+    const isInOutsideExtent = ext && local.y < 0 && local.y >= ext.top && local.x >= ext.left && local.x <= ext.right;
     const primitive =
       blocks.find(contains) ??
-      // 没点中文字时取框内的第一个文字块 (如点在便签内边距上)；框外的文字 (画框标题) 须点中才编辑
-      blocks.find((p) => p.x >= 0 && p.y >= 0);
+      (isInOutsideExtent ? blocks.find((p) => (p.y ?? 0) < 0) : undefined) ??
+      // 没点中文字时取框内的第一个文字块 (如点在便签内边距上)；框外的文字 (画框标题) 须在标题区域内才编辑
+      blocks.find((p) => (p.x ?? 0) >= 0 && (p.y ?? 0) >= 0);
     if (!primitive) return false;
 
     const handler: TextInputHandler = {
@@ -427,7 +507,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       typingStyle: null,
       composition: null,
       scrollY: 0,
-      groupId: generateId('text-edit'),
+      groupId,
       input: this.ctx.host.openTextInput(handler),
       disposeScope: this.ctx.registerInputScope({
         id: 'text:editing',
@@ -547,7 +627,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
   private handleKey(state: EditState, geometry: BlockGeometry, key: string, mod: boolean, shift: boolean): boolean {
     const text = getRunsText(geometry.runs);
     const [start, end] = this.range(state);
-    if (key === 'Escape') {
+    if (key === 'Escape' || (key === 'Enter' && geometry.primitive.style.textWrap === 'none')) {
       this.exit();
       return true;
     }
@@ -756,8 +836,11 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       value: transform(b)
     }));
     if (patches.length === 0) return;
-    this.ctx.document.commit({ label, groupId: this.state?.groupId, patches });
-    if (this.state) this.refresh(false);
+    this.ctx.document.commit({ label, patches });
+    if (this.state) {
+      this.state.groupId = generateId('text-edit');
+      this.refresh(false);
+    }
   }
 
   /**
@@ -784,6 +867,8 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       if (!node || (!state && node.locked)) continue;
       for (const primitive of this.textPrimitives(node)) {
         if (state && primitive.id !== state.blockId) continue;
+        // 未在编辑中时，外部标示槽位 (画框标题) 不作为整块文字的格式目标，选中画框不弹出文字格式条
+        if (!state && node.nodeType === 'frame' && primitive.id === 'title') continue;
         const blockIndex = node.textBlocks?.findIndex((b) => b.id === primitive.id) ?? -1;
         if (blockIndex < 0) continue;
         const block = node.textBlocks![blockIndex];
@@ -868,14 +953,39 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     return hitTestText(geometry.layout, this.toBox(geometry, point), this.fonts);
   }
 
-  /** 点是否落在编辑节点的外框上 (超出文本框的文字已裁剪，不再可点) */
+  /** 点是否落在编辑节点的外框或文本编辑区域内 (超出文本框的文字已裁剪，不再可点) */
   private isInsideNode(nodeId: string, point: Point, geometry: BlockGeometry): boolean {
-    const node = this.ctx.document.getNode(nodeId)!;
+    const node = this.ctx.document.getNode(nodeId);
+    if (!node) return false;
     const local = applyMatrix(invertMatrix(geometry.toWorld), point.x, point.y);
     if (local.x >= 0 && local.y >= 0 && local.x <= node.width && local.y <= node.height) return true;
+
+    // 落在正在编辑的文本块自身排版范围内 (画框等框外标题文本，根据编辑态溢出策略确定覆盖范围)
+    const { layout, primitive } = geometry;
+    const isVisibleOverflow =
+      (primitive.style.editingOverflow ?? (primitive.style.textWrap === 'none' ? 'visible' : 'scroll')) === 'visible';
+    const width = isVisibleOverflow ? Math.max(primitive.width ?? 0, layout.width) : (primitive.width ?? layout.width);
+    const height = isVisibleOverflow
+      ? Math.max(primitive.height ?? 0, layout.height)
+      : (primitive.height ?? layout.height);
+    if (
+      local.x >= primitive.x &&
+      local.y >= primitive.y &&
+      local.x <= primitive.x + width &&
+      local.y <= primitive.y + height
+    ) {
+      return true;
+    }
+
+    // 落在节点的 extent 框外扩展区域内
+    const definition = this.ctx.nodeTypes.get(node.nodeType);
+    const ext = definition?.extent?.(node as NodeEntity);
+    if (ext && local.x >= ext.left && local.x <= ext.right && local.y >= ext.top && local.y <= ext.bottom) {
+      return true;
+    }
+
     // 自适应宽度的文字可能超出外框 (尚未随组合文字伸缩)
     const box = this.toBox(geometry, point);
-    const { layout, primitive } = geometry;
     return (
       primitive.height === undefined && box.x >= 0 && box.y >= 0 && box.x <= layout.width && box.y <= layout.height
     );
@@ -999,7 +1109,10 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       this.exit();
       return;
     }
-    if (change.viewportChanged || change.themeChanged) this.redraw();
+    if (change.viewportChanged || change.themeChanged) {
+      this.redraw();
+      if (state && change.viewportChanged) this.emit();
+    }
   }
 
   private onDocumentChange(changes: DocumentChangeSet): void {
