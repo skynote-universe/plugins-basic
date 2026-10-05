@@ -102,23 +102,18 @@ export class FreeTextNodeType implements NodeTypeDefinition {
       return withBody(node, {
         ...block,
         sizing: block.sizing === 'fixed' ? 'fixed' : 'auto-height',
-        explicitWidth: Math.round(width)
+        explicitWidth: width
       });
     }
     if (scale === 1 && (handle === 'n' || handle === 's')) {
-      return withBody(node, {
-        ...block,
-        sizing: 'fixed',
-        explicitWidth: Math.round(width),
-        explicitHeight: Math.round(height)
-      });
+      return withBody(node, { ...block, sizing: 'fixed', explicitWidth: width, explicitHeight: height });
     }
     const fontSize = resolveTextBlockStyle(node, block, this).fontSize ?? DEFAULT_FONT_SIZE;
     return withBody(node, {
       ...block,
-      style: { ...block.style, fontSize: Math.max(MIN_FONT_SIZE, Math.round(fontSize * scale)) },
-      ...(block.explicitWidth !== undefined && { explicitWidth: Math.round(block.explicitWidth * scale) }),
-      ...(block.explicitHeight !== undefined && { explicitHeight: Math.round(block.explicitHeight * scale) })
+      style: { ...block.style, fontSize: Math.max(MIN_FONT_SIZE, Math.round(fontSize * scale * 100) / 100) },
+      ...(block.explicitWidth !== undefined && { explicitWidth: block.explicitWidth * scale }),
+      ...(block.explicitHeight !== undefined && { explicitHeight: block.explicitHeight * scale })
     });
   }
 

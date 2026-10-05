@@ -5,8 +5,10 @@
  * 设计考量 (Why):
  * 1. 所见即所得：编辑视图 (editingTextPrimitive) 由渲染器与本插件共用，光标、选区与点击定位读同一份排版；
  *    宿主只提供隐藏的输入通道 (键入、输入法、粘贴、剪贴板)，本插件不感知 DOM。
- * 2. 实时提交、一步撤销：每次输入立即写入文档 (外框随文字伸缩、协同方实时可见)，整个编辑过程共用一个 groupId；
- *    编辑中按 Ctrl+Z 先退出编辑再整体撤销。
+ * 2. 实时提交、分段撤销：每次输入立即写入文档 (外框随文字伸缩、协同方实时可见)。连续打字合并为一步；
+ *    格式调整各自成一步，打断打字段 (撤销先回退格式后的文字，再回退格式)；同一目标连续改同一项取值
+ *    (颜色、字号、对齐) 合并为一步，试色不必逐个撤销；加粗等开关不合并，否则开关两次会合成一步空撤销。
+ *    编辑中按 Ctrl+Z 先退出编辑再撤销。
  * 3. 输入法组合文字只在本地显示 (会话中的 composition，带下划线插入排版)，确认后才写入文档，协同方看不到拼音。
  * 4. 超出文本框的文字裁剪显示：光标、拖选自动滚动到可见，滚轮在文本框内滚动文字；滚动是本地状态，不进入文档。
  * 5. 编辑时占用最高优先级的键盘作用域并消费全部按键：Delete、空格等不会落到删除节点、平移画布等画布快捷键；
@@ -22,12 +24,15 @@ import {
   applyMatrix,
   applyRunStyle,
   caretRect,
+  editingTextBounds,
   editingTextPrimitive,
+  findTextSlot,
   generateId,
   getRunsText,
   hitTestText,
   invertMatrix,
   layoutText,
+  transformBounds,
   mergeStyle,
   nextWordBoundary,
   offsetAtX,
@@ -71,6 +76,7 @@ import {
   type TextInputSession,
   type TextLayout,
   type TextPrimitive,
+  type NodeTextSlotDefinition,
   type RectBounds,
   type VerticalAlign
 } from '@skynote/core';
@@ -108,10 +114,11 @@ export interface TextEditSnapshot {
   readonly end: number;
 }
 
+/** 取值类格式：同一目标连续调整合并为一步撤销 (开关类格式不在此列) */
+const MERGEABLE_STYLE_KEYS: ReadonlySet<string> = new Set(['color', 'backgroundColor', 'fontSize']);
+
 /** 当前格式目标 (编辑选区或选中节点的整块文字) 的样式，浮动工具栏据此显示按下态 */
 export interface TextFormatState {
-  /** 是否在画布内编辑 (否则作用于选中节点的整块文字) */
-  readonly editing: boolean;
   /** 全部目标文字共有的生效样式 (分段样式覆盖块样式后取值一致的键) */
   readonly style: RichTextRunStyle;
   /** 段落对齐；各段不一致时为 undefined */
@@ -120,15 +127,13 @@ export interface TextFormatState {
   readonly verticalAlign: VerticalAlign | undefined;
   /** 目标中有固定高度的文字块 (便签、形状标签)：垂直对齐对它们有效 */
   readonly verticalAlignable: boolean;
-  /** 是否允许调节字号 (画框标题等固定尺寸标示为 false) */
-  readonly resizableFont?: boolean;
-  /** 当前编辑文字块在视口中的屏幕包围盒 (未编辑时为 undefined) */
-  readonly screenBounds?: RectBounds;
 }
 
 interface EditState {
   readonly nodeId: string;
   readonly blockId: string;
+  /** 编辑块所属插槽：决定是否纯文本、是否单行 */
+  readonly slot: NodeTextSlotDefinition | undefined;
   anchor: number;
   focus: number;
   affinity: CaretAffinity;
@@ -140,7 +145,7 @@ interface EditState {
   composition: TextComposition | null;
   /** 文字超出文本框时的滚动距离 */
   scrollY: number;
-  /** 打字输入的撤销组标识：每次调整格式后刷新，确保格式操作与后续打字独立撤销 */
+  /** 当前打字段的撤销组：格式调整后换新，格式与前后的打字各自撤销 */
   groupId: string;
   readonly input: TextInputSession;
   readonly disposeScope: () => void;
@@ -177,6 +182,8 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
   readonly version = '0.1.0';
   private ctx!: CanvasPluginContext;
   private state: EditState | null = null;
+  /** 上一次可合并的格式调整 (属性 + 目标范围)：紧接着的同类调整并入它的撤销组 */
+  private lastFormat: { key: string; groupId: string } | null = null;
   /** 拖选中的指针与最近的落点 (自动滚动时据此重新定位) */
   private drag: { pointerId: number; point: Point } | null = null;
   private autoScrollTimer: ReturnType<typeof setInterval> | null = null;
@@ -230,55 +237,21 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     const aligns = new Set(blocks.map((b) => this.alignAt(b)));
     const fixed = blocks.filter((b) => b.fixedHeight);
     const verticalAligns = new Set(fixed.map((b) => b.blockStyle.verticalAlign ?? 'top'));
-
-    const geometry = state ? this.geometry(state) : null;
-    let screenBounds: RectBounds | undefined;
-    if (state && geometry) {
-      const { primitive, layout, toWorld } = geometry;
-      const isVisibleOverflow =
-        (primitive.style.editingOverflow ?? (primitive.style.textWrap === 'none' ? 'visible' : 'scroll')) === 'visible';
-      const width = isVisibleOverflow
-        ? Math.max(primitive.width ?? 0, layout.width)
-        : (primitive.width ?? layout.width);
-      const height = isVisibleOverflow
-        ? Math.max(primitive.height ?? 0, layout.height)
-        : (primitive.height ?? layout.height);
-      const localCorners: Point[] = [
-        { x: primitive.x, y: primitive.y },
-        { x: primitive.x + width, y: primitive.y },
-        { x: primitive.x + width, y: primitive.y + height },
-        { x: primitive.x, y: primitive.y + height }
-      ];
-      let minX = Infinity;
-      let minY = Infinity;
-      let maxX = -Infinity;
-      let maxY = -Infinity;
-      for (let i = 0; i < localCorners.length; i++) {
-        const pt = localCorners[i];
-        const w = applyMatrix(toWorld, pt.x, pt.y);
-        if (w.x < minX) minX = w.x;
-        if (w.y < minY) minY = w.y;
-        if (w.x > maxX) maxX = w.x;
-        if (w.y > maxY) maxY = w.y;
-      }
-      const { viewport } = this.ctx.session;
-      const topLeft = worldToScreen({ x: minX, y: minY }, viewport);
-      const bottomRight = worldToScreen({ x: maxX, y: maxY }, viewport);
-      screenBounds = { left: topLeft.x, top: topLeft.y, right: bottomRight.x, bottom: bottomRight.y };
-    }
-
-    const isFrameTitle =
-      state !== null && state.blockId === 'title' && this.ctx.document.getNode(state.nodeId)?.nodeType === 'frame';
-
     return {
-      editing: state !== null,
       style: typing ? mergeStyle(style, typing) : style,
       align: aligns.size === 1 ? [...aligns][0] : undefined,
       verticalAlign: verticalAligns.size === 1 ? [...verticalAligns][0] : undefined,
-      verticalAlignable: fixed.length > 0,
-      resizableFont: !isFrameTitle,
-      screenBounds
+      verticalAlignable: fixed.length > 0
     };
+  }
+
+  /**
+   * 编辑中文字的世界外接框 (含延展出文本框的部分与旋转)，界面据此把工具栏放在文字旁；未编辑时为 null
+   * 用世界坐标而非屏幕坐标：视口变化时由界面换算，插件不必随平移缩放广播
+   */
+  get editingBounds(): RectBounds | null {
+    const geometry = this.state && this.geometry(this.state);
+    return geometry && transformBounds(editingTextBounds(geometry.primitive, geometry.layout), geometry.toWorld);
   }
 
   /** 订阅编辑态与格式目标的变化 (进入、退出、选区、样式，以及未编辑时选中节点的变化) */
@@ -295,9 +268,16 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     if (state && state.anchor === state.focus) {
       state.typingStyle = { ...state.typingStyle, ...patch };
       this.refresh(false);
+      state.input.focus();
       return;
     }
-    this.commitBlocks(this.formatBlocks(), (b) => applyRunStyle(b.runs, b.start, b.end, patch), '设置文字格式');
+    const keys = Object.keys(patch);
+    this.commitBlocks(
+      this.formatBlocks(),
+      (b) => applyRunStyle(b.runs, b.start, b.end, patch),
+      '设置文字格式',
+      keys.every((key) => MERGEABLE_STYLE_KEYS.has(key)) ? keys.sort().join() : undefined
+    );
   }
 
   /** 加粗、斜体、下划线、删除线：目标全部已有该格式时取消，否则全部加上 */
@@ -334,24 +314,23 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     if (state && blocks[0] && blocks[0].start === blocks[0].end) {
       state.typingStyle = { ...state.typingStyle, textAlign: align };
     }
-    this.commitBlocks(blocks, (b) => applyRunStyle(b.runs, b.start, b.end, { textAlign: align }), '段落对齐');
+    this.commitBlocks(
+      blocks,
+      (b) => applyRunStyle(b.runs, b.start, b.end, { textAlign: align }),
+      '段落对齐',
+      'textAlign'
+    );
   }
 
   /** 垂直对齐：写入文字块自身的样式 (整块生效)，只作用于有固定高度的文字块 */
   setVerticalAlign(verticalAlign: VerticalAlign): void {
-    const patches: CanvasPatch[] = this.formatBlocks()
-      .filter((b) => b.fixedHeight)
-      .map((b) => ({
-        op: 'set',
-        path: ['content', 'nodes', b.nodeId, 'textBlocks', b.blockIndex, 'style'],
-        value: { ...b.ownStyle, verticalAlign }
-      }));
-    if (patches.length === 0) return;
-    this.ctx.document.commit({ label: '垂直对齐', patches });
-    if (this.state) {
-      this.state.groupId = generateId('text-edit');
-      this.refresh(false);
-    }
+    const blocks = this.formatBlocks().filter((b) => b.fixedHeight);
+    const patches: CanvasPatch[] = blocks.map((b) => ({
+      op: 'set',
+      path: ['content', 'nodes', b.nodeId, 'textBlocks', b.blockIndex, 'style'],
+      value: { ...b.ownStyle, verticalAlign }
+    }));
+    this.commitFormat(blocks, patches, '垂直对齐', 'verticalAlign');
   }
 
   /** 退出编辑 (保留节点选中) */
@@ -433,34 +412,10 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
 
   /** 双击节点进入编辑：定位到点中的文字块 (都没点中时取框内的第一个)，光标放在点击处 */
   private enter(node: Readonly<NodeEntity>, point: Point): boolean {
-    let blocks = this.textPrimitives(node);
+    const blocks = this.textPrimitives(node);
     const toWorld = this.ctx.entities.getWorldTransform(node.id);
     const fonts = this.ctx.document.fonts;
-    if (!toWorld || !fonts) return false;
-
-    const groupId = generateId('text-edit');
-    if (blocks.length === 0) {
-      // 节点暂无文字块：若声明了插槽 (如形状节点的 label)，自动补齐空文字块并与编辑同组撤销
-      const definition = this.ctx.nodeTypes.get(node.nodeType);
-      const defaultSlot = definition?.slots?.[0];
-      if (!defaultSlot) return false;
-      const newBlock: TextBlock = {
-        id: defaultSlot.slot,
-        slot: defaultSlot.slot,
-        runs: [{ text: '' }]
-      };
-      this.ctx.document.updateNode(
-        node.id,
-        { textBlocks: [...(node.textBlocks ?? []), newBlock] },
-        { label: '编辑文字', groupId }
-      );
-      const updated = this.ctx.document.getNode(node.id);
-      if (!updated) return false;
-      blocks = this.textPrimitives(updated);
-      if (blocks.length === 0) return false;
-      node = updated;
-    }
-
+    if (blocks.length === 0 || !toWorld || !fonts) return false;
     const local = applyMatrix(invertMatrix(toWorld), point.x, point.y);
     // 文字框的实际范围：未限定宽高的 (如自适应文本、画框标题) 按排版结果
     const contains = (p: TextPrimitive): boolean => {
@@ -472,15 +427,10 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       const height = p.height ?? layout!.height;
       return local.x >= p.x && local.y >= p.y && local.x <= p.x + width && local.y <= p.y + height;
     };
-    const definition = this.ctx.nodeTypes.get(node.nodeType);
-    const ext = definition?.extent?.(node as NodeEntity);
-    // 若点击落在框外扩展区域 (如画框标题带)，且有框外文本块，优先匹配框外文本块
-    const isInOutsideExtent = ext && local.y < 0 && local.y >= ext.top && local.x >= ext.left && local.x <= ext.right;
     const primitive =
       blocks.find(contains) ??
-      (isInOutsideExtent ? blocks.find((p) => (p.y ?? 0) < 0) : undefined) ??
-      // 没点中文字时取框内的第一个文字块 (如点在便签内边距上)；框外的文字 (画框标题) 须在标题区域内才编辑
-      blocks.find((p) => (p.x ?? 0) >= 0 && (p.y ?? 0) >= 0);
+      // 没点中文字时取框内的第一个文字块 (如点在便签内边距上)；框外的文字 (画框标题) 须点中才编辑
+      blocks.find((p) => p.x >= 0 && p.y >= 0);
     if (!primitive) return false;
 
     const handler: TextInputHandler = {
@@ -497,9 +447,11 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       }
     };
     this.ctx.session.setSelection({ nodeIds: [node.id], connectorIds: [] });
+    const block = node.textBlocks!.find((b) => b.id === primitive.id)!;
     const state: EditState = {
       nodeId: node.id,
       blockId: primitive.id!,
+      slot: findTextSlot(block, this.ctx.nodeTypes.get(node.nodeType)),
       anchor: 0,
       focus: 0,
       affinity: 'forward',
@@ -507,7 +459,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       typingStyle: null,
       composition: null,
       scrollY: 0,
-      groupId,
+      groupId: generateId('text-edit'),
       input: this.ctx.host.openTextInput(handler),
       disposeScope: this.ctx.registerInputScope({
         id: 'text:editing',
@@ -627,12 +579,12 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
   private handleKey(state: EditState, geometry: BlockGeometry, key: string, mod: boolean, shift: boolean): boolean {
     const text = getRunsText(geometry.runs);
     const [start, end] = this.range(state);
-    if (key === 'Escape' || (key === 'Enter' && geometry.primitive.style.textWrap === 'none')) {
+    if (key === 'Escape' || (key === 'Enter' && state.slot?.singleLine)) {
       this.exit();
       return true;
     }
     if (mod && (key === 'z' || key === 'y')) {
-      // 编辑过程是一步撤销：先退出编辑再撤销 / 重做
+      // 先退出编辑再撤销 / 重做：撤销会改写正在编辑的文字，光标与选区随之失效
       this.exit();
       if (key === 'z' && !shift) this.ctx.document.undo();
       else this.ctx.document.redo();
@@ -740,14 +692,15 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     if (!state || !geometry) return;
     const [start, end] = this.range(state);
     const style = this.typingRunStyle(state, geometry.runs, start);
-    this.replaceSelection(state, geometry, replaceText(geometry.runs, start, end, text, style), start + text.length);
+    const value = state.slot?.singleLine ? text.replace(/\r?\n/g, ' ') : text;
+    this.replaceSelection(state, geometry, replaceText(geometry.runs, start, end, value, style), start + value.length);
   }
 
-  /** 粘贴：剪贴板带画布富文本分段时保留样式，否则按纯文本插入 */
+  /** 粘贴：剪贴板带画布富文本分段时保留样式 (纯文本插槽除外)，否则按纯文本插入 */
   private paste(content: TextClipboardContent): void {
     const { state } = this;
     const geometry = state && this.geometry(state);
-    const runs = content.richText ? parseRichTextRuns(content.richText) : null;
+    const runs = content.richText && !state?.slot?.plainText ? parseRichTextRuns(content.richText) : null;
     if (!state || !geometry || !runs) {
       this.insertText(content.text);
       return;
@@ -824,22 +777,42 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     });
   }
 
-  /** 按格式目标逐块改写分段，一次提交 (编辑中并入编辑过程的撤销组) */
+  /** 按格式目标逐块改写分段，一次提交 */
   private commitBlocks(
     blocks: readonly FormatBlock[],
     transform: (block: FormatBlock) => RichTextRun[],
-    label: string
+    label: string,
+    mergeKey?: string
   ): void {
     const patches: CanvasPatch[] = blocks.map((b) => ({
       op: 'set',
       path: ['content', 'nodes', b.nodeId, 'textBlocks', b.blockIndex, 'runs'],
       value: transform(b)
     }));
+    this.commitFormat(blocks, patches, label, mergeKey);
+  }
+
+  /**
+   * 格式调整单独成一步撤销：mergeKey 与目标范围都和上一次相同时并入上一次的撤销组
+   * (撤销栈只合并紧邻的同组条目，中间夹了别的操作自然不会合并)；编辑中随后的打字另起一段
+   */
+  private commitFormat(
+    blocks: readonly FormatBlock[],
+    patches: CanvasPatch[],
+    label: string,
+    mergeKey: string | undefined
+  ): void {
     if (patches.length === 0) return;
-    this.ctx.document.commit({ label, patches });
+    const key =
+      mergeKey && `${mergeKey}|${blocks.map((b) => `${b.nodeId}:${b.blockIndex}:${b.start}:${b.end}`).join()}`;
+    const groupId = key && this.lastFormat?.key === key ? this.lastFormat.groupId : generateId('text-format');
+    this.ctx.document.commit({ label, groupId, patches });
+    this.lastFormat = key ? { key, groupId } : null;
     if (this.state) {
       this.state.groupId = generateId('text-edit');
       this.refresh(false);
+      // 格式可能来自会拿走焦点的界面控件 (如颜色面板的十六进制输入框)：交还输入通道，接着就能打字
+      this.state.input.focus();
     }
   }
 
@@ -865,13 +838,14 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     for (const id of nodeIds) {
       const node = this.ctx.document.getNode(id);
       if (!node || (!state && node.locked)) continue;
+      const definition = this.ctx.nodeTypes.get(node.nodeType);
       for (const primitive of this.textPrimitives(node)) {
         if (state && primitive.id !== state.blockId) continue;
-        // 未在编辑中时，外部标示槽位 (画框标题) 不作为整块文字的格式目标，选中画框不弹出文字格式条
-        if (!state && node.nodeType === 'frame' && primitive.id === 'title') continue;
         const blockIndex = node.textBlocks?.findIndex((b) => b.id === primitive.id) ?? -1;
         if (blockIndex < 0) continue;
         const block = node.textBlocks![blockIndex];
+        // 纯文本插槽 (如画框标题) 的外观由节点类型固定，不是格式目标
+        if (findTextSlot(block, definition)?.plainText) continue;
         blocks.push({
           nodeId: id,
           blockIndex,
@@ -953,42 +927,16 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     return hitTestText(geometry.layout, this.toBox(geometry, point), this.fonts);
   }
 
-  /** 点是否落在编辑节点的外框或文本编辑区域内 (超出文本框的文字已裁剪，不再可点) */
+  /**
+   * 点是否落在编辑节点上：节点外框或编辑中文字的可见范围 (延展出文本框的标题、随输入伸缩的自适应文字)；
+   * 在框内滚动的文字超出部分已裁剪，不再可点
+   */
   private isInsideNode(nodeId: string, point: Point, geometry: BlockGeometry): boolean {
-    const node = this.ctx.document.getNode(nodeId);
-    if (!node) return false;
+    const node = this.ctx.document.getNode(nodeId)!;
     const local = applyMatrix(invertMatrix(geometry.toWorld), point.x, point.y);
     if (local.x >= 0 && local.y >= 0 && local.x <= node.width && local.y <= node.height) return true;
-
-    // 落在正在编辑的文本块自身排版范围内 (画框等框外标题文本，根据编辑态溢出策略确定覆盖范围)
-    const { layout, primitive } = geometry;
-    const isVisibleOverflow =
-      (primitive.style.editingOverflow ?? (primitive.style.textWrap === 'none' ? 'visible' : 'scroll')) === 'visible';
-    const width = isVisibleOverflow ? Math.max(primitive.width ?? 0, layout.width) : (primitive.width ?? layout.width);
-    const height = isVisibleOverflow
-      ? Math.max(primitive.height ?? 0, layout.height)
-      : (primitive.height ?? layout.height);
-    if (
-      local.x >= primitive.x &&
-      local.y >= primitive.y &&
-      local.x <= primitive.x + width &&
-      local.y <= primitive.y + height
-    ) {
-      return true;
-    }
-
-    // 落在节点的 extent 框外扩展区域内
-    const definition = this.ctx.nodeTypes.get(node.nodeType);
-    const ext = definition?.extent?.(node as NodeEntity);
-    if (ext && local.x >= ext.left && local.x <= ext.right && local.y >= ext.top && local.y <= ext.bottom) {
-      return true;
-    }
-
-    // 自适应宽度的文字可能超出外框 (尚未随组合文字伸缩)
-    const box = this.toBox(geometry, point);
-    return (
-      primitive.height === undefined && box.x >= 0 && box.y >= 0 && box.x <= layout.width && box.y <= layout.height
-    );
+    const bounds = editingTextBounds(geometry.primitive, geometry.layout);
+    return local.x >= bounds.left && local.y >= bounds.top && local.x <= bounds.right && local.y <= bounds.bottom;
   }
 
   private range(state: EditState): [number, number] {
@@ -1109,10 +1057,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       this.exit();
       return;
     }
-    if (change.viewportChanged || change.themeChanged) {
-      this.redraw();
-      if (state && change.viewportChanged) this.emit();
-    }
+    if (change.viewportChanged || change.themeChanged) this.redraw();
   }
 
   private onDocumentChange(changes: DocumentChangeSet): void {

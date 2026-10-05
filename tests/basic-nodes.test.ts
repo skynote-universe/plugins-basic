@@ -169,22 +169,19 @@ describe('自由文本', () => {
     expect(store.canFitContent('t')).toBe(false);
   });
 
-  it('自由文本等比缩放时字号四舍五入取整，固定宽高同样整数化 (无小数点)', () => {
+  it('自由文本缩放保留精度：字号只保留两位小数，宽度原样写入 (像素对齐交给渲染端)', () => {
     const engine = createEngine();
     const store = engine.documentStore;
     store.createNode({ nodeType: 'free-text', id: 't', x: 0, y: 0, options: { text: 'hello' } });
     const node = store.getNode('t')!;
     const def = engine.nodeTypes.get('free-text')!;
 
-    // 模拟拖角缩放 1.13 倍 (原本 18px * 1.13 = 20.34px -> 应四舍五入为 20px)
+    // 拖角缩放 1.13 倍：18px → 20.34px，不跳档到整数，避免缩放过程中文字反复折行
     const resized = def.applyResize!(node, { handle: 'se', width: 50.85, height: 28.25, scale: 1.13 });
-    const block = resized.textBlocks?.[0];
-    expect(block?.style?.fontSize).toBe(20);
+    expect(resized.textBlocks?.[0].style?.fontSize).toBe(20.34);
 
-    // 模拟左右拉边改变宽度，传入浮点宽度 -> 应 Math.round 整数化
     const sideResized = def.applyResize!(node, { handle: 'e', width: 145.38, height: 26, scale: 1 });
-    const sideBlock = sideResized.textBlocks?.[0];
-    expect(sideBlock?.explicitWidth).toBe(145);
+    expect(sideResized.textBlocks?.[0].explicitWidth).toBe(145.38);
   });
 });
 
@@ -240,8 +237,6 @@ describe('画框', () => {
     expect(t1.width).toBe(480);
     expect(t1.height).toBe(20);
     expect(t1.style.textOverflow).toBe('ellipsis');
-    expect(t1.style.overflow).toBe('ellipsis');
-    expect(t1.style.editingOverflow).toBe('visible');
     const def = engine.nodeTypes.get('frame')!;
     expect(def.extent!(engine.documentStore.getNode('f1')!)).toMatchObject({ top: -24, right: 480 });
   });

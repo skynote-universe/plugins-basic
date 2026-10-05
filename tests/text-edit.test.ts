@@ -35,6 +35,7 @@ class FakeHost implements CanvasHost, OverlayChannel {
   readonly sessions = new Map<string, readonly CanvasPrimitive[]>();
   handler: TextInputHandler | null = null;
   inputOpen = false;
+  focusCount = 0;
 
   get overlay(): OverlayChannel {
     return this;
@@ -54,7 +55,9 @@ class FakeHost implements CanvasHost, OverlayChannel {
     this.inputOpen = true;
     return {
       setCaretRect: () => {},
-      focus: () => {},
+      focus: () => {
+        this.focusCount++;
+      },
       close: () => {
         this.inputOpen = false;
       }
@@ -187,36 +190,6 @@ describe('进入与退出', () => {
     key(engine, 'Escape');
     expect(engine.session.textEditing).toBeNull();
     expect(store.getNode('rect1')!.textBlocks![0].runs[0].text).toBe('矩形文本');
-  });
-
-  it('老数据或未初始化 textBlocks 的形状节点，双击自动补齐文本块并进入编辑', () => {
-    const context = setup();
-    const { engine, host, store } = context;
-    // 模拟老节点，无 textBlocks 字段
-    store.addNode({
-      id: 'legacy-rect',
-      type: 'node',
-      nodeType: 'shape',
-      x: 300,
-      y: 300,
-      width: 160,
-      height: 100,
-      rotation: 0,
-      zIndex: 'a0',
-      locked: false,
-      data: { geometry: 'rectangle' }
-    });
-    expect(store.getNode('legacy-rect')!.textBlocks).toBeUndefined();
-
-    press(engine, { x: 350, y: 350 });
-    press(engine, { x: 350, y: 350 }, 2);
-
-    expect(engine.session.textEditing).toMatchObject({ nodeId: 'legacy-rect', blockId: 'label' });
-    expect(host.inputOpen).toBe(true);
-    expect(store.getNode('legacy-rect')!.textBlocks).toBeDefined();
-
-    host.handler!.insertText('自愈文本');
-    expect(store.getNode('legacy-rect')!.textBlocks![0].runs[0].text).toBe('自愈文本');
   });
 });
 
@@ -459,7 +432,7 @@ describe('段落对齐与格式目标', () => {
     const { engine, plugin, store, runs } = context;
     store.createNode({ nodeType: 'sticky', id: 's', x: 400, y: 100, options: { text: 'x' } });
     engine.session.setSelection({ nodeIds: ['t', 's'] });
-    expect(plugin.formatState).toMatchObject({ editing: false });
+    expect(plugin.snapshot).toBeNull();
     plugin.toggleFormat('bold');
     expect(runs()).toEqual([{ text: 'hello world', fontWeight: 'bold' }]);
     expect(store.getNode('s')!.textBlocks![0].runs).toEqual([{ text: 'x', fontWeight: 'bold' }]);
@@ -497,20 +470,72 @@ describe('段落对齐与格式目标', () => {
     expect(runs()[0].backgroundColor).toBeUndefined();
   });
 
-  it('编辑态下 formatState 暴露当前编辑文本块的屏幕包围盒 screenBounds', () => {
+  it('设置格式后把焦点交还输入通道：从会夺焦的界面控件改格式后仍能接着打字', () => {
+    const context = setup();
+    const { engine, host, plugin } = context;
+    enterAt(context, 0);
+    const before = host.focusCount;
+    plugin.applyStyle({ color: '$red' });
+    expect(host.focusCount).toBe(before + 1);
+    key(engine, 'a', { ctrlKey: true });
+    plugin.toggleFormat('bold');
+    plugin.setAlign('center');
+    expect(host.focusCount).toBe(before + 3);
+  });
+
+  it('同一选区连续改同一项取值 (试色、调字号) 合并为一步；加粗等开关各自成步', () => {
+    const context = setup();
+    const { engine, plugin, store, runs } = context;
+    enterAt(context, 0);
+    key(engine, 'a', { ctrlKey: true });
+
+    plugin.applyStyle({ color: '$red' });
+    plugin.applyStyle({ color: '$sky' });
+    plugin.applyStyle({ color: '$violet' });
+    plugin.toggleFormat('bold');
+    plugin.toggleFormat('bold');
+    expect(runs()[0].color).toBe('$violet');
+
+    store.undo();
+    expect(runs()[0].fontWeight).toBe('bold');
+    store.undo();
+    expect(runs()[0].fontWeight).toBeUndefined();
+    expect(runs()[0].color).toBe('$violet');
+    // 三次试色只需一步撤销
+    store.undo();
+    expect(runs()[0].color).toBeUndefined();
+  });
+
+  it('格式打断打字段：撤销先回退格式之后的文字，再回退格式，再回退格式之前的文字', () => {
+    const context = setup();
+    const { engine, host, plugin, store, text, runs } = context;
+    enterAt(context, 0);
+    host.handler!.insertText('A');
+    host.handler!.insertText('B');
+    key(engine, 'a', { ctrlKey: true });
+    plugin.applyStyle({ color: '$red' });
+    key(engine, 'End');
+    host.handler!.insertText('C');
+    expect(text()).toBe('ABhello worldC');
+
+    store.undo();
+    expect(text()).toBe('ABhello world');
+    expect(runs()[0].color).toBe('$red');
+    store.undo();
+    expect(runs()[0].color).toBeUndefined();
+    store.undo();
+    expect(text()).toBe('hello world');
+  });
+
+  it('editingBounds 给出编辑中文字的世界外接框，未编辑时为 null', () => {
     const context = setup();
     const { plugin } = context;
-    expect(plugin.formatState?.screenBounds).toBeUndefined();
+    expect(plugin.editingBounds).toBeNull();
 
     enterAt(context, 0);
-    expect(plugin.formatState?.editing).toBe(true);
-    const bounds = plugin.formatState?.screenBounds;
-    expect(bounds).toBeDefined();
-    // 节点在 x: 100, y: 100 处，屏幕包围盒应覆盖该区域
-    expect(bounds!.left).toBeCloseTo(100, 0);
-    expect(bounds!.top).toBeCloseTo(100, 0);
-    expect(bounds!.right).toBeGreaterThan(100);
-    expect(bounds!.bottom).toBeGreaterThan(100);
+    // 自由文本 t 在 (100, 100)：hello world 共 11 字，每字宽 9，行高 25.2
+    expect(plugin.editingBounds).toMatchObject({ left: 100, top: 100, right: 199 });
+    expect(plugin.editingBounds!.bottom).toBeCloseTo(125.2);
   });
 
   it('画框外部标题栏双击能正确进入编辑，编辑中按 Enter 直接确认退出', () => {
@@ -619,8 +644,8 @@ describe('段落对齐与格式目标', () => {
     expect(engine.session.textEditing).toMatchObject({ nodeId: 'f2', blockId: 'title' });
   });
 
-  it('未编辑时选中画框不弹出文字格式条，双击编辑画框标题时 resizableFont 为 false', () => {
-    const { engine, store, plugin } = setup();
+  it('画框标题是纯文本插槽：未编辑时不作为格式目标，编辑时也没有格式可设，粘贴只取纯文本、换行替换为空格', () => {
+    const { engine, store, plugin, host } = setup();
     store.createNode({
       id: 'f3',
       nodeType: 'frame',
@@ -631,17 +656,18 @@ describe('段落对齐与格式目标', () => {
       options: { title: 'Frame3' }
     });
 
-    // 选中画框本体
     engine.session.setSelection({ nodeIds: ['f3'] });
     expect(plugin.formatState).toBeNull();
 
-    // 双击进入标题编辑态
     const titlePoint: Point = { x: 70, y: 35 };
     press(engine, titlePoint, 1);
     press(engine, titlePoint, 2);
     expect(engine.session.textEditing).toMatchObject({ nodeId: 'f3', blockId: 'title' });
-    expect(plugin.formatState).not.toBeNull();
-    expect(plugin.formatState?.editing).toBe(true);
-    expect(plugin.formatState?.resizableFont).toBe(false);
+    expect(plugin.formatState).toBeNull();
+    plugin.applyStyle({ color: '$red' });
+
+    key(engine, 'a', { ctrlKey: true });
+    host.handler!.paste({ text: 'A\nB', richText: JSON.stringify([{ text: 'A\nB', fontWeight: 'bold' }]) });
+    expect(store.getNode('f3')!.textBlocks![0].runs).toEqual([{ text: 'A B' }]);
   });
 });

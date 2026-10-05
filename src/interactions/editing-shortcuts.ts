@@ -1,12 +1,13 @@
 /**
  * @file editing-shortcuts.ts
- * @description 编辑快捷键：删除、撤销重做、全选、取消选择、层级调整、方向键微移、切换比例锁定
+ * @description 编辑快捷键：删除、撤销重做、全选、取消选择、创建副本、锁定、层级调整、方向键微移、切换比例锁定
  *
  * 设计考量 (Why):
  * 1. 全部注册到焦点栈 (ADR-005)，只在画布持有焦点时生效；文本编辑等更高优先级作用域先行消费，
  *    打字时的 Backspace、方向键不会误删节点或移动节点。
- * 2. 操作选区中的节点，锁定节点不参与删除、移动与层级调整。
- * 3. Esc 清空选区后不消费按键，让更低优先级的兜底 (清除瞬态图元) 继续执行。
+ * 2. 操作选区中的节点，锁定节点不参与删除、移动、复制与层级调整；锁定开关作用于全部选中节点 (否则无法解锁)。
+ * 3. 锁定用 Ctrl+Shift+L：Ctrl+L 是浏览器聚焦地址栏的快捷键，常被浏览器或扩展抢先处理。
+ * 4. Esc 清空选区后不消费按键，让更低优先级的兜底 (清除瞬态图元) 继续执行。
  */
 
 import {
@@ -21,6 +22,8 @@ export const EDITING_SHORTCUTS_PLUGIN_ID = '@skynote/plugins-basic/editing-short
 /** 方向键微移的世界距离：普通 1，按住 Shift 为 10 */
 const NUDGE_STEP = 1;
 const NUDGE_STEP_LARGE = 10;
+/** 创建副本相对原节点的世界偏移 */
+const DUPLICATE_OFFSET = { x: 20, y: 20 };
 
 const ARROW_DELTAS: Record<string, { x: number; y: number }> = {
   ArrowLeft: { x: -1, y: 0 },
@@ -51,6 +54,17 @@ export class EditingShortcutsPlugin implements SkyNotePlugin {
       document.redo();
     } else if (mod && e.code === 'KeyA') {
       session.setSelection({ nodeIds: entities.getChildIds(undefined), connectorIds: [] });
+    } else if (mod && !e.shiftKey && e.code === 'KeyD') {
+      const ids = this.editableSelection();
+      if (ids.length === 0) return false;
+      const copies = document.duplicateNodes(ids, DUPLICATE_OFFSET);
+      if (copies.length > 0) session.setSelection({ nodeIds: copies, connectorIds: [] });
+    } else if (mod && e.shiftKey && e.code === 'KeyL') {
+      const ids = [...session.selectedNodeIds];
+      if (ids.length === 0) return false;
+      // 全部已锁定时解锁，否则全部锁定 (与工具栏、右键菜单一致)
+      const locked = !ids.every((id) => entities.getNode(id)!.entity.locked);
+      document.updateNodes(ids, { locked }, { label: locked ? '锁定节点' : '解锁节点' });
     } else if (e.key === 'Escape') {
       session.setSelection({ nodeIds: [], connectorIds: [] });
       return false;

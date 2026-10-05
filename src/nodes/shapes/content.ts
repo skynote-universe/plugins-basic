@@ -10,6 +10,7 @@
 
 import {
   createTextBlockPrimitive,
+  resolveNodeStyle,
   resolveTextBlockStyle,
   resolveTextPadding,
   type CanvasPrimitive,
@@ -32,43 +33,28 @@ export interface ShapeData extends Record<string, unknown> {
 
 export const SHAPE_DEFAULT_SIZE = { width: 160, height: 100 } as const;
 const LABEL_SLOT = 'label';
-const DEFAULT_STROKE_WIDTH = 2;
-
-interface OutlineStyle {
+/** 各几何共用的填充与描边 */
+interface ShapePaint {
   fill: string;
   stroke: string;
-  strokeWidth: number;
-  radius: NodeStyle['radius'];
+  strokeWidth?: number;
   strokeDashArray?: number[];
   strokeCap?: NodeStyle['strokeCap'];
   strokeJoin?: NodeStyle['strokeJoin'];
 }
 
-/** 形状轮廓：只描述几何，颜色与线宽统一由样式传入 */
-const GEOMETRY_BUILDERS: Record<ShapeGeometry, (w: number, h: number, style: OutlineStyle) => CanvasPrimitive> = {
-  rectangle: (w, h, style) => ({ kind: 'rect', x: 0, y: 0, width: w, height: h, ...style }),
-  ellipse: (w, h, { fill, stroke, strokeWidth, strokeDashArray, strokeCap, strokeJoin }) => ({
-    kind: 'ellipse',
-    cx: w / 2,
-    cy: h / 2,
-    rx: w / 2,
-    ry: h / 2,
-    fill,
-    stroke,
-    strokeWidth,
-    strokeDashArray,
-    strokeCap,
-    strokeJoin
-  }),
-  diamond: (w, h, { fill, stroke, strokeWidth, strokeDashArray, strokeCap, strokeJoin }) => ({
+/** 形状轮廓：只描述几何，填充与描边统一传入；圆角只对矩形有意义 */
+const GEOMETRY_BUILDERS: Record<
+  ShapeGeometry,
+  (w: number, h: number, paint: ShapePaint, radius: NodeStyle['radius']) => CanvasPrimitive
+> = {
+  rectangle: (w, h, paint, radius) => ({ kind: 'rect', x: 0, y: 0, width: w, height: h, radius, ...paint }),
+  ellipse: (w, h, paint) => ({ kind: 'ellipse', cx: w / 2, cy: h / 2, rx: w / 2, ry: h / 2, ...paint }),
+  diamond: (w, h, paint) => ({
     kind: 'polygon',
     points: [w / 2, 0, w, h / 2, w / 2, h, 0, h / 2],
-    fill,
-    stroke,
-    strokeWidth,
-    strokeJoin: strokeJoin ?? 'round',
-    strokeDashArray,
-    strokeCap
+    ...paint,
+    strokeJoin: paint.strokeJoin ?? 'round'
   })
 };
 
@@ -120,6 +106,7 @@ export class ShapeNodeType implements NodeTypeDefinition {
   readonly type = ShapeNodeType.TYPE;
   readonly label = '形状';
   readonly defaultData: ShapeData = { geometry: 'rectangle' };
+  readonly defaultStyle: NodeStyle = { strokeWidth: 2 };
   readonly sizingPolicy: NodeSizingPolicy = 'fixed';
   readonly slots: NodeTextSlotDefinition[] = [
     {
@@ -151,16 +138,16 @@ export class ShapeNodeType implements NodeTypeDefinition {
   }
 
   compose(node: NodeEntity, { theme }: NodeComposeContext): CanvasPrimitive[] {
-    const { style } = node;
-    const shape = GEOMETRY_BUILDERS[resolveGeometry(node)](node.width, node.height, {
-      fill: typeof style?.fill === 'string' ? style.fill : theme.nodeFill,
-      stroke: style?.stroke ?? theme.nodeStroke,
-      strokeWidth: style?.strokeWidth ?? DEFAULT_STROKE_WIDTH,
-      radius: style?.radius,
-      strokeDashArray: style?.strokeDashArray,
-      strokeCap: style?.strokeCap,
-      strokeJoin: style?.strokeJoin
-    });
+    const style = resolveNodeStyle(node, this);
+    const paint: ShapePaint = {
+      fill: typeof style.fill === 'string' ? style.fill : theme.nodeFill,
+      stroke: style.stroke ?? theme.nodeStroke,
+      strokeWidth: style.strokeWidth,
+      strokeDashArray: style.strokeDashArray,
+      strokeCap: style.strokeCap,
+      strokeJoin: style.strokeJoin
+    };
+    const shape = GEOMETRY_BUILDERS[resolveGeometry(node)](node.width, node.height, paint, style.radius);
     const primitives: CanvasPrimitive[] = [shape];
 
     const block = node.textBlocks?.find((b) => b.slot === LABEL_SLOT);

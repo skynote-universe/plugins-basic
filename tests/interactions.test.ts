@@ -326,6 +326,23 @@ describe('编辑快捷键', () => {
     expect(store.getNode('a')).toMatchObject({ x: 1, y: 10 });
   });
 
+  it('Ctrl+D 创建副本 (跳过锁定节点) 并选中副本；Ctrl+Shift+L 锁定，全部已锁定时解锁', () => {
+    const { engine, store } = setup();
+    store.updateNode('b', { locked: true }, { undoable: false });
+    engine.session.setSelection({ nodeIds: ['a', 'b'] });
+    expect(key(engine, 'KeyD', { key: 'd', ctrlKey: true })).toBe(true);
+    const [copy] = selection(engine);
+    expect(selection(engine)).toHaveLength(1);
+    expect(store.getNode(copy)).toMatchObject({ x: 20, y: 20 });
+
+    engine.session.setSelection({ nodeIds: ['a', 'b'] });
+    key(engine, 'KeyL', { key: 'L', ctrlKey: true, shiftKey: true });
+    expect(store.getNode('a')!.locked).toBe(true);
+    key(engine, 'KeyL', { key: 'L', ctrlKey: true, shiftKey: true });
+    expect(store.getNode('a')!.locked).toBe(false);
+    expect(store.getNode('b')!.locked).toBe(false);
+  });
+
   it('没有选区时删除与方向键不消费按键 (交给页面或其他作用域)', () => {
     const { engine } = setup();
     expect(key(engine, 'Delete', { key: 'Delete' })).toBe(false);

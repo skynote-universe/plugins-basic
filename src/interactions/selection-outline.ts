@@ -12,7 +12,8 @@
 import {
   applyMatrix,
   computeTextLayout,
-  replaceText,
+  resolveTextBlockStyle,
+  withComposition,
   type CanvasPluginContext,
   type CanvasPointerEvent,
   type CanvasPrimitive,
@@ -131,15 +132,11 @@ export class SelectionOutlinePlugin implements SkyNotePlugin, PointerHooks {
       const { entity } = runtimeNode;
       let { width, height } = entity;
 
-      // 若节点正在进行画布内文本编辑，且处于输入法组合输入等未提交状态，按包含组合文字的排版尺寸动态绘制外框
+      // 输入法组合文字只在本地显示、尚未写入文档：自适应节点的外框按含组合文字的排版伸缩，不被文字撑出
       const editing = session.textEditing?.nodeId === id ? session.textEditing : null;
       if (editing?.composition && fonts) {
-        const previewNode = this.nodeWithComposition(entity, editing);
-        const layoutSize = computeTextLayout(previewNode, nodeTypes.get(entity.nodeType), fonts);
-        if (layoutSize) {
-          width = layoutSize.width;
-          height = layoutSize.height;
-        }
+        const size = computeTextLayout(this.withComposition(entity, editing), nodeTypes.get(entity.nodeType), fonts);
+        if (size) ({ width, height } = size);
       }
 
       const m = entities.getWorldTransform(id)!;
@@ -160,15 +157,17 @@ export class SelectionOutlinePlugin implements SkyNotePlugin, PointerHooks {
     host.overlay.setPrimitives(OUTLINE_SESSION, primitives);
   }
 
-  /** 将未落盘的输入法组合文字临时注入节点模型，供排版引擎预览外框尺寸 */
-  private nodeWithComposition(node: Readonly<NodeEntity>, editing: TextEditingTarget): NodeEntity {
-    const { composition } = editing;
-    if (!composition || !node.textBlocks) return node as NodeEntity;
-    const textBlocks = node.textBlocks.map((block) => {
-      if (block.id !== editing.blockId) return block;
-      const runs = replaceText(block.runs, composition.offset, composition.offset, composition.text, composition.style);
-      return { ...block, runs };
-    });
-    return { ...node, textBlocks };
+  /** 编辑块插入组合文字后的节点 (只用于测量) */
+  private withComposition(node: Readonly<NodeEntity>, editing: TextEditingTarget): NodeEntity {
+    const definition = this.ctx.nodeTypes.get(node.nodeType);
+    const textBlocks = node.textBlocks!.map((block) =>
+      block.id === editing.blockId
+        ? {
+            ...block,
+            runs: [...withComposition(block.runs, editing.composition, resolveTextBlockStyle(node, block, definition))]
+          }
+        : block
+    );
+    return { ...node, textBlocks } as NodeEntity;
   }
 }

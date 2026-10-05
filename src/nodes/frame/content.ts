@@ -4,20 +4,22 @@
  *
  * 设计考量 (Why):
  * 1. 外框归用户：尺寸由用户决定，不随子节点变化 (与组合不同，组合外框由子节点派生)。
- * 2. 标题在框外：框内空间全部留给子节点；标题区域经 extent 与 outline 纳入拾取，点标题选中画框，双击标题改名。
+ * 2. 标题在框外：框内空间全部留给子节点；标题带经 extent 纳入拾取 (outline 只是画框本体，悬停高亮贴合画框)，
+ *    点标题带选中画框，双击标题改名。标题是单行纯文本插槽：字号固定，标题带高度因此是常量，超长时省略。
  * 3. 子节点坐标相对画框 (ADR-114)：移动、旋转画框只改画框自身；拖入拖出由选择插件按 acceptsChildren 改挂。
  * 4. 颜色缺省跟随主题 (nodeFill / nodeStroke)，显式设置的颜色原样保留。
  */
 
 import {
   createTextBlockPrimitive,
-  resolveLineHeightPx,
+  resolveNodeStyle,
   resolveTextBlockStyle,
   type CanvasPrimitive,
   type NodeComposeContext,
   type NodeCreateContent,
   type NodeEntity,
   type NodeSizingPolicy,
+  type NodeStyle,
   type NodeTextSlotDefinition,
   type NodeTypeDefinition,
   type Point,
@@ -28,17 +30,9 @@ export const FRAME_DEFAULT_SIZE = { width: 480, height: 320 } as const;
 const TITLE_SLOT = 'title';
 const TITLE_FONT_SIZE = 14;
 const TITLE_LINE_HEIGHT = 1.4;
-/** 标题与外框的间距 */
-const TITLE_GAP = 4;
-
-/** 计算标题文本块的单行排版高度 (统一使用内核标准行高解析) */
-function computeTitleHeight(node: NodeEntity, definition: NodeTypeDefinition): number {
-  const title = node.textBlocks?.find((b) => b.slot === TITLE_SLOT);
-  if (!title) return 0;
-  const style = resolveTextBlockStyle(node, title, definition);
-  const fontSize = style.fontSize ?? TITLE_FONT_SIZE;
-  return Math.ceil(resolveLineHeightPx(style.lineHeight ?? TITLE_LINE_HEIGHT, fontSize));
-}
+const TITLE_HEIGHT = Math.ceil(TITLE_FONT_SIZE * TITLE_LINE_HEIGHT);
+/** 框外标题带的高度 (标题行高 + 与外框的间距) */
+const TITLE_BAND = TITLE_HEIGHT + 4;
 
 export interface FrameCreateOptions {
   title?: string;
@@ -56,6 +50,7 @@ export class FrameNodeType implements NodeTypeDefinition {
   readonly type = FrameNodeType.TYPE;
   readonly label = '画框';
   readonly defaultData = {};
+  readonly defaultStyle: NodeStyle = { strokeWidth: 1, radius: 4 };
   readonly sizingPolicy: NodeSizingPolicy = 'fixed';
   readonly clipChildren = true;
   readonly acceptsChildren = true;
@@ -63,13 +58,13 @@ export class FrameNodeType implements NodeTypeDefinition {
     {
       slot: TITLE_SLOT,
       label: '标题',
+      plainText: true,
+      singleLine: true,
       defaultStyle: {
         fontSize: TITLE_FONT_SIZE,
         lineHeight: TITLE_LINE_HEIGHT,
         textWrap: 'none',
-        overflow: 'ellipsis',
-        textOverflow: 'ellipsis',
-        editingOverflow: 'visible'
+        textOverflow: 'ellipsis'
       }
     }
   ];
@@ -81,14 +76,12 @@ export class FrameNodeType implements NodeTypeDefinition {
     };
   }
 
-  /** 外框上方的标题带纳入占据范围 (整条与画框同宽，高度固定为单行) */
+  /** 外框上方的标题带纳入占据范围 (整条与画框同宽，标题短于画框时空白处同样可点选画框) */
   extent(node: NodeEntity): RectBounds {
-    const titleHeight = computeTitleHeight(node, this);
-    const top = titleHeight > 0 ? -TITLE_GAP - titleHeight : -TITLE_GAP - TITLE_FONT_SIZE;
-    return { left: 0, top, right: node.width, bottom: node.height };
+    return { left: 0, top: -TITLE_BAND, right: node.width, bottom: node.height };
   }
 
-  /** 画框视觉轮廓：仅包含画框本体矩形 (悬停高亮只贴合形状，框外标题通过 extent 参与交互拾取) */
+  /** 画框本体轮廓 (悬停高亮贴合画框)；框外标题带经 extent 参与拾取 */
   outline(node: NodeEntity): Point[] {
     const { width: w, height: h } = node;
     return [
@@ -100,7 +93,7 @@ export class FrameNodeType implements NodeTypeDefinition {
   }
 
   compose(node: NodeEntity, { theme }: NodeComposeContext): CanvasPrimitive[] {
-    const fill = node.style?.fill;
+    const style = resolveNodeStyle(node, this);
     const primitives: CanvasPrimitive[] = [
       {
         kind: 'rect',
@@ -108,24 +101,22 @@ export class FrameNodeType implements NodeTypeDefinition {
         y: 0,
         width: node.width,
         height: node.height,
-        fill: typeof fill === 'string' ? fill : theme.nodeFill,
-        stroke: node.style?.stroke ?? theme.nodeStroke,
-        strokeWidth: node.style?.strokeWidth ?? 1,
-        strokeDashArray: node.style?.strokeDashArray,
-        radius: node.style?.radius ?? 4
+        fill: typeof style.fill === 'string' ? style.fill : theme.nodeFill,
+        stroke: style.stroke ?? theme.nodeStroke,
+        strokeWidth: style.strokeWidth,
+        strokeDashArray: style.strokeDashArray,
+        radius: style.radius
       }
     ];
     const title = node.textBlocks?.find((b) => b.slot === TITLE_SLOT);
     if (title) {
-      const titleHeight = computeTitleHeight(node, this);
-      const titleY = titleHeight > 0 ? -TITLE_GAP - titleHeight : -TITLE_GAP - TITLE_FONT_SIZE;
-      const titleStyle = { ...resolveTextBlockStyle(node, title, this), fontSize: TITLE_FONT_SIZE };
+      // 标题宽度即画框宽度：超长时省略号结尾，编辑时完整延展
       primitives.push(
-        createTextBlockPrimitive(title, titleStyle, {
+        createTextBlockPrimitive(title, resolveTextBlockStyle(node, title, this), {
           x: 0,
-          y: titleY,
+          y: -TITLE_BAND,
           width: node.width,
-          height: titleHeight > 0 ? titleHeight : undefined
+          height: TITLE_HEIGHT
         })
       );
     }
