@@ -5,3 +5,4 @@ export * from './editing-shortcuts';
 export * from './transform';
 export * from './text-edit';
 export * from './text-format';
+export * from './clipboard';
