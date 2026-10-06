@@ -11,6 +11,7 @@
 import {
   createTextBlockPrimitive,
   getPlainText,
+  resolveNodeStyle,
   resolveTextBlockStyle,
   resolveTextPadding,
   type CanvasPrimitive,
@@ -18,6 +19,7 @@ import {
   type NodeCreateContent,
   type NodeEntity,
   type NodeSizingPolicy,
+  type NodeStyle,
   type NodeTextSlotDefinition,
   type NodeTypeDefinition
 } from '@skynote/core';
@@ -59,6 +61,7 @@ export class StickyNodeType implements NodeTypeDefinition {
   readonly defaultData = {};
   readonly sizingPolicy: NodeSizingPolicy = 'fixed';
   readonly defaultAspectLocked = true;
+  readonly defaultStyle: NodeStyle = { radius: 4 };
   readonly slots: NodeTextSlotDefinition[] = [
     {
       slot: BODY_SLOT,
@@ -102,9 +105,22 @@ export class StickyNodeType implements NodeTypeDefinition {
     return Math.abs(height - node.height) < SIZE_EPSILON ? null : { height };
   }
 
+  supportsCornerRadius(): boolean {
+    return true;
+  }
+
   compose(node: NodeEntity): CanvasPrimitive[] {
     const primitives: CanvasPrimitive[] = [
-      { kind: 'rect', x: 0, y: 0, width: node.width, height: node.height, fill: solidFill(node), radius: 4 }
+      {
+        kind: 'rect',
+        x: 0,
+        y: 0,
+        width: node.width,
+        height: node.height,
+        fill: solidFill(node),
+        fillOpacity: node.style?.fillOpacity,
+        radius: resolveNodeStyle(node, this).radius
+      }
     ];
     const block = node.textBlocks?.find((b) => b.slot === BODY_SLOT);
     if (block) {

@@ -204,6 +204,29 @@ describe('形状', () => {
     });
   });
 
+  it('三角形与星形：默认方形外框，顶点铺满外框，拾取轮廓与绘制一致；填充不透明度传给图元', () => {
+    const engine = createEngine();
+    const store = engine.documentStore;
+    store.createNode({ nodeType: 'shape', id: 't', x: 0, y: 0, options: { geometry: 'triangle' } });
+    store.createNode({ nodeType: 'shape', id: 's', x: 0, y: 0, options: { geometry: 'star' } });
+    expect(store.getNode('t')).toMatchObject({ width: 120, height: 120 });
+
+    expect(compose(engine, 't')[0]).toMatchObject({ kind: 'polygon', points: [60, 0, 120, 120, 0, 120] });
+    const star = compose(engine, 's')[0] as CanvasPrimitive & { points: number[] };
+    expect(star.points).toHaveLength(20);
+    const xs = star.points.filter((_, i) => i % 2 === 0);
+    const ys = star.points.filter((_, i) => i % 2 === 1);
+    expect(Math.min(...xs)).toBeCloseTo(0);
+    expect(Math.max(...xs)).toBeCloseTo(120);
+    expect(Math.min(...ys)).toBeCloseTo(0);
+    expect(Math.max(...ys)).toBeCloseTo(120);
+    const outline = engine.nodeTypes.get('shape')!.outline!(store.getNode('s')!);
+    expect(outline.flatMap((p) => [p.x, p.y])).toEqual(star.points);
+
+    store.updateNode('s', { style: { fillOpacity: 0.4 } });
+    expect(compose(engine, 's')[0]).toMatchObject({ fillOpacity: 0.4 });
+  });
+
   it('标签居中且超出省略，文字再长也不改变形状尺寸', () => {
     const engine = createEngine();
     engine.documentStore.createNode({ nodeType: 'shape', id: 'r', x: 0, y: 0, options: { label: '开始' } });
@@ -217,6 +240,27 @@ describe('形状', () => {
       height: 76,
       style: { textOverflow: 'ellipsis', verticalAlign: 'middle' }
     });
+  });
+});
+
+describe('圆角', () => {
+  it('矩形形状、便签与画框画圆角，椭圆、菱形与自由文本不提供圆角；便签默认圆角 4，可调整', () => {
+    const engine = createEngine();
+    const store = engine.documentStore;
+    store.createNode({ nodeType: 'shape', id: 'r', x: 0, y: 0 });
+    store.createNode({ nodeType: 'shape', id: 'e', x: 0, y: 0, options: { geometry: 'ellipse' } });
+    store.createNode({ nodeType: 'sticky', id: 's', x: 0, y: 0 });
+    store.createNode({ nodeType: 'frame', id: 'f', x: 0, y: 0 });
+    store.createNode({ nodeType: 'free-text', id: 't', x: 0, y: 0, options: { text: '字' } });
+    const supports = (id: string) => {
+      const node = store.getNode(id)!;
+      return engine.nodeTypes.get(node.nodeType)!.supportsCornerRadius?.(node) ?? false;
+    };
+    expect(['r', 'e', 's', 'f', 't'].map(supports)).toEqual([true, false, true, true, false]);
+
+    expect(compose(engine, 's')[0]).toMatchObject({ kind: 'rect', radius: 4 });
+    store.updateNode('s', { style: { radius: 12 } });
+    expect(compose(engine, 's')[0]).toMatchObject({ kind: 'rect', radius: 12 });
   });
 });
 

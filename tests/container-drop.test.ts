@@ -58,7 +58,9 @@ function pointer(engine: SkyNoteEngine, phase: 'down' | 'move' | 'up', point: Po
   const event = new SyntheticPointerEvent({
     point,
     clickCount,
-    target: engine.hitTestNode(point) as NodeEntity | undefined
+    target: engine.hitTestNode(point) as NodeEntity | undefined,
+    // 按住 Ctrl 关闭吸附：这里验证落点的世界位置，不让附近节点把它吸过去
+    modifiers: { ctrl: true }
   });
   if (phase === 'down') engine.pointer.dispatchPointerDown(event);
   else if (phase === 'move') engine.pointer.dispatchPointerMove(event);

@@ -11,8 +11,11 @@
  *    拖边时另一轴以中心为基准；节点类型只声明拖角是否缩放内容与缩放后写入的字段 (applyResize)，插件不写特例。
  * 4. 多选含锁定或旋转节点时整体等比：非等比缩放会把旋转的矩形拉成平行四边形，模型无法表达。
  * 5. 以高于选择与移动 (0) 的优先级接收指针并认领，按在控制柄上时不会同时触发框选或拖动节点。
+ * 6. 缩放时被拖的边吸附到附近节点的边缘与中心线 (见 snapping.ts)：被拖的边总是跟着指针走 (按 Alt 时也一样)，
+ *    因此修正指针位置即可，后续的等比与夹取照常计算。外框旋转时边不沿世界坐标轴，不吸附；按住 Ctrl / ⌘ 临时关闭。
  */
 
+import { SNAP_THRESHOLD_PX, collectSnapTargets, drawSnapGuides, type SnapTargets } from './snapping';
 import {
   applyMatrix,
   clonePlainData,
@@ -31,6 +34,7 @@ import {
   type NodeTransform,
   type Point,
   type PointerHooks,
+  type RectBounds,
   type ResizeHandle,
   type SessionChange,
   type SkyNotePlugin,
@@ -89,6 +93,8 @@ type Gesture =
       start: Point;
       selection: SelectionFrame;
       groupId: string;
+      /** 吸附候选；外框旋转时为 null */
+      snap: SnapTargets | null;
     }
   | { kind: 'rotate'; pointerId: number; start: Point; selection: SelectionFrame; groupId: string };
 
@@ -145,13 +151,21 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
       ...selection,
       targets: selection.targets.map(({ node, frame }) => ({ node: clonePlainData(node), frame }))
     };
-    this.gesture = {
-      ...hit,
-      pointerId: e.pointerId,
-      start: e.point,
-      selection: snapshot,
-      groupId: generateId('transform')
-    };
+    const base = { pointerId: e.pointerId, start: e.point, selection: snapshot, groupId: generateId('transform') };
+    this.gesture =
+      hit.kind === 'resize'
+        ? {
+            ...base,
+            ...hit,
+            snap:
+              selection.frame.rotation % 360 === 0
+                ? collectSnapTargets(
+                    this.ctx,
+                    selection.targets.map(({ node }) => node.id)
+                  )
+                : null
+          }
+        : { ...base, ...hit };
   }
 
   onPointerMove(e: CanvasPointerEvent): void {
@@ -161,10 +175,15 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
       return;
     }
     if (gesture.pointerId !== e.pointerId) return;
-    const transforms =
-      gesture.kind === 'resize'
-        ? this.computeResize(gesture.selection, gesture.handle, gesture.start, e)
-        : this.computeRotate(gesture.selection, gesture.start, e);
+    let transforms: NodeTransform[];
+    if (gesture.kind === 'resize') {
+      const snap = e.modifiers.ctrl || e.modifiers.meta ? null : gesture.snap;
+      const resized = this.computeResize(gesture.selection, gesture.handle, gesture.start, e, snap);
+      transforms = resized.transforms;
+      drawSnapGuides(this.ctx, snap && snap.guides(resized.bounds, false));
+    } else {
+      transforms = this.computeRotate(gesture.selection, gesture.start, e);
+    }
     this.ctx.document.transformNodes(transforms, {
       groupId: gesture.groupId,
       label: gesture.kind === 'resize' ? '缩放节点' : '旋转节点'
@@ -185,6 +204,7 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   private finish(pointerId: number): void {
+    drawSnapGuides(this.ctx, null);
     this.ctx.host.releasePointer(pointerId);
     this.ctx.host.setCursor('default');
     this.gesture = null;
@@ -309,20 +329,28 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
   /**
    * 在外框自身坐标轴中计算新外框：对侧 (或按 Alt 时的中心) 固定，拖动侧跟随指针
    * 再把每个节点从旧外框映射到新外框
+   * @param snap 吸附候选 (只在外框未旋转时提供，此时局部坐标轴与世界坐标轴同向)
+   * @returns 各节点的变换与新外框的世界范围 (外框旋转时该范围无意义，只在吸附时使用)
    */
   private computeResize(
     selection: SelectionFrame,
     handle: ResizeHandle,
     start: Point,
-    e: CanvasPointerEvent
-  ): NodeTransform[] {
+    e: CanvasPointerEvent,
+    snap: SnapTargets | null
+  ): { transforms: NodeTransform[]; bounds: RectBounds } {
     const { frame } = selection;
 
-    // 1. [局部坐标投影] 将指针位移转换至外框局部坐标系
+    // 1. [局部坐标投影] 将指针位移转换至外框局部坐标系；被拖的边吸附时修正指针位置
     const toLocal = invertMatrix(computeFrameMatrix(frame));
     const p0 = applyMatrix(toLocal, start.x, start.y);
     const p = applyMatrix(toLocal, e.point.x, e.point.y);
     const sign = HANDLE_SIGNS[handle];
+    if (snap) {
+      const threshold = SNAP_THRESHOLD_PX / this.ctx.session.viewport.zoom;
+      if (sign.x !== 0) p.x += snap.snapEdge('x', frame.cx + (sign.x * frame.width) / 2 + p.x - p0.x, threshold);
+      if (sign.y !== 0) p.y += snap.snapEdge('y', frame.cy + (sign.y * frame.height) / 2 + p.y - p0.y, threshold);
+    }
     const fromCenter = e.modifiers.alt;
     const factor = fromCenter ? 2 : 1;
 
@@ -355,8 +383,9 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     const kx = width / frame.width;
     const ky = height / frame.height;
     const { nodeTypes } = this.ctx;
+    const origin = applyMatrix(fromOld, left, top);
 
-    return selection.targets.map(({ node, frame: nodeFrame }) => {
+    const transforms = selection.targets.map(({ node, frame: nodeFrame }) => {
       // 节点中心在旧外框局部坐标中的位置，按两轴比例映射到新外框
       const c = applyMatrix(toLocal, nodeFrame.cx, nodeFrame.cy);
       const center = applyMatrix(fromOld, left + c.x * kx, top + c.y * ky);
@@ -377,6 +406,10 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
       });
       return { id: node.id, frame: nextFrame, fields };
     });
+    return {
+      transforms,
+      bounds: { left: origin.x, top: origin.y, right: origin.x + width, bottom: origin.y + height }
+    };
   }
 
   // ================= 旋转 =================

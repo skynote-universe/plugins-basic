@@ -92,6 +92,10 @@ export class FrameNodeType implements NodeTypeDefinition {
     ];
   }
 
+  supportsCornerRadius(): boolean {
+    return true;
+  }
+
   compose(node: NodeEntity, { theme }: NodeComposeContext): CanvasPrimitive[] {
     const style = resolveNodeStyle(node, this);
     const primitives: CanvasPrimitive[] = [
@@ -102,6 +106,7 @@ export class FrameNodeType implements NodeTypeDefinition {
         width: node.width,
         height: node.height,
         fill: typeof style.fill === 'string' ? style.fill : theme.nodeFill,
+        fillOpacity: style.fillOpacity,
         stroke: style.stroke ?? theme.nodeStroke,
         strokeWidth: style.strokeWidth,
         strokeDashArray: style.strokeDashArray,

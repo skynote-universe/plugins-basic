@@ -18,10 +18,12 @@
 import {
   SELECT_TOOL,
   applyMatrix,
+  applyMatrixToVector,
   clonePlainData,
   computeNodeLocalMatrix,
+  facingAnchor,
   multiplyMatrix,
-  outlineAnchors,
+  resolveNodeAnchors,
   resolveNodeOutline,
   type CanvasKeyboardEvent,
   type CanvasPluginContext,
@@ -50,7 +52,7 @@ const PLUS_SESSION = 'connector-tool:plus';
 const DRAG_THRESHOLD_PX = 4;
 /** 预览线的屏幕线宽 */
 const PREVIEW_STROKE_PX = 2;
-/** 快速连接点离吸附点的屏幕距离、平时与悬停时的半径、命中半径 */
+/** 快速连接点离外框边的屏幕距离、平时与悬停时的半径、命中半径 */
 const PLUS_OFFSET_PX = 22;
 const PLUS_DOT_RADIUS_PX = 4;
 const PLUS_HOVER_RADIUS_PX = 10;
@@ -59,7 +61,7 @@ const PLUS_HIT_PX = 12;
 const PREVIEW_DASH_PX = [5, 4];
 /** 快速连接新建的节点与原节点之间的间距 (世界坐标) */
 const QUICK_GAP = 100;
-/** 四个方向：上、右、下、左 (与吸附点顺序一致) */
+/** 「+」的四个方向 (节点局部坐标)：上、右、下、左；连线从最朝向该方向的吸附点出发 */
 const SIDES: readonly Point[] = [
   { x: 0, y: -1 },
   { x: 1, y: 0 },
@@ -369,15 +371,18 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
     if (previous[0]?.nodeId !== node.id) this.hoveredSide = null;
     const zoom = session.viewport.zoom;
     const m = ctx.entities.getWorldTransform(node.id)!;
-    const center = applyMatrix(m, node.width / 2, node.height / 2);
+    const anchors = resolveNodeAnchors(node, definition, resolveNodeOutline(node, definition));
     const primitives: CanvasPrimitive[] = [];
-    ctx.connectors.getConnectorAnchors(node.id).forEach((anchor, side) => {
-      const dx = anchor.x - center.x;
-      const dy = anchor.y - center.y;
-      const length = Math.hypot(dx, dy) || 1;
+    SIDES.forEach((dir, side) => {
+      const local = facingAnchor(anchors, dir).point;
+      const anchor = applyMatrix(m, local.x, local.y);
+      // 「+」放在外框该边中点外侧：星形、三角形的吸附点不在边中点上，「+」仍然排得整齐
+      const edge = applyMatrix(m, (node.width / 2) * (1 + dir.x), (node.height / 2) * (1 + dir.y));
+      const out = applyMatrixToVector(m, dir.x, dir.y);
+      const length = Math.hypot(out.x, out.y) || 1;
       const point = {
-        x: anchor.x + (dx / length) * (PLUS_OFFSET_PX / zoom),
-        y: anchor.y + (dy / length) * (PLUS_OFFSET_PX / zoom)
+        x: edge.x + (out.x / length) * (PLUS_OFFSET_PX / zoom),
+        y: edge.y + (out.y / length) * (PLUS_OFFSET_PX / zoom)
       };
       const snap = ctx.connectors.snapConnectorEndpoint(anchor, (n) => n.id === node.id);
       this.plusHandles.push({ nodeId: node.id, side, point, anchor: snap });
@@ -399,8 +404,9 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
     const local = computeNodeLocalMatrix({ ...source, x, y });
     const parent = source.parentId === undefined ? undefined : ctx.entities.getWorldTransform(source.parentId);
     const m = parent ? multiplyMatrix(parent, local) : local;
-    const outline = resolveNodeOutline(source, ctx.nodeTypes.get(source.nodeType));
-    const target = outlineAnchors(outline)[(side + 2) % 4].point;
+    const definition = ctx.nodeTypes.get(source.nodeType);
+    const outline = resolveNodeOutline(source, definition);
+    const target = facingAnchor(resolveNodeAnchors(source, definition, outline), SIDES[(side + 2) % 4]).point;
     const end = applyMatrix(m, target.x, target.y);
     const unit = 1 / ctx.session.viewport.zoom;
     const paint = {
@@ -421,9 +427,9 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
     ];
   }
 
+  /** 不按 plusHandles 判断是否已清除：drawPlus 会先清空列表再决定不显示，此时覆盖层上仍有上一次的图元 */
   private clearPlus(): void {
     this.hoveredSide = null;
-    if (this.plusHandles.length === 0) return;
     this.plusHandles = [];
     this.ctx.host.overlay.clear(PLUS_SESSION);
   }

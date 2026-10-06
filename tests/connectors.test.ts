@@ -346,6 +346,43 @@ describe('快速连接', () => {
     expect(connectors(engine)).toHaveLength(0);
   });
 
+  it('星形的吸附点是五个尖角，三角形是顶点与各边中点；「+」排在外框四边，连线从最朝向该方向的吸附点出发', () => {
+    const { engine, store, host } = setup();
+    store.createNode({ nodeType: 'shape', id: 's', x: 0, y: 300, options: { geometry: 'star' } });
+    store.createNode({ nodeType: 'shape', id: 't', x: 300, y: 300, options: { geometry: 'triangle' } });
+    const round = (points: Point[]) => points.map((p) => ({ x: Math.round(p.x) + 0, y: Math.round(p.y) + 0 }));
+    // 120×120 的星形：顶尖、右上、右下、左下、左上
+    expect(round(engine.getConnectorAnchors('s'))).toEqual([
+      { x: 60, y: 300 },
+      { x: 120, y: 346 },
+      { x: 97, y: 420 },
+      { x: 23, y: 420 },
+      { x: 0, y: 346 }
+    ]);
+    expect(round(engine.getConnectorAnchors('t'))).toEqual([
+      { x: 360, y: 300 },
+      { x: 390, y: 360 },
+      { x: 360, y: 420 },
+      { x: 330, y: 360 }
+    ]);
+
+    // 「+」在外框四边中点外侧
+    engine.session.setSelection({ nodeIds: ['s'] });
+    const dots = host.sessions.get('connector-tool:plus')!.filter((p) => p.kind === 'circle');
+    expect(dots.map((p) => p.kind === 'circle' && [Math.round(p.cx), Math.round(p.cy)])).toEqual([
+      [60, 278],
+      [142, 360],
+      [60, 442],
+      [-22, 360]
+    ]);
+    // 单击下方「+」：两端浮动，从星形朝下的尖角出发 (而不是两腿之间的凹处)
+    pointer(engine, 'down', { x: 60, y: 442 });
+    pointer(engine, 'up', { x: 60, y: 442 });
+    const [line] = connectors(engine);
+    const start = engine.getConnectorRoute(line.id)!.points[0];
+    expect(Math.round(start.y)).toBeGreaterThanOrEqual(420);
+  });
+
   it('拖动「+」从这条边画线；松手在空白处通知界面，界面选择后在自由端新建节点并连上', () => {
     const { engine, store, tool } = setup();
     const drops: { connectorId: string; point: { x: number; y: number } }[] = [];
@@ -363,6 +400,14 @@ describe('快速连接', () => {
     expect(sticky.y).toBe(400);
     expect(store.getConnector(connector.id)!.to).toEqual({ nodeId: id });
     expect([...engine.session.selectedNodeIds]).toEqual([id]);
+  });
+
+  it('选中节点后切换到连线工具：「+」随之消失', () => {
+    const { engine, host } = setup();
+    engine.session.setSelection({ nodeIds: ['a'] });
+    expect(host.sessions.has('connector-tool:plus')).toBe(true);
+    engine.session.setTool(CONNECTOR_TOOL);
+    expect(host.sessions.has('connector-tool:plus')).toBe(false);
   });
 
   it('编辑文字、多选或选中画框时不显示「+」', () => {

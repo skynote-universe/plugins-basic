@@ -16,12 +16,15 @@
  * 6. 节点与连线都点中时按画面层叠取最上层 (与渲染同一规则)：穿过画框的连线画在画框之上，点线即选线；
  *    盖住连线的无关节点优先。
  *    拖动时选中连线的自由端与手动拐点随之平移，连在节点上的一端跟随节点。
+ * 7. 拖动节点时吸附对齐 (边缘、中心线与等间距，见 snapping.ts)：每帧由「指针相对按下点的位移 + 吸附修正」
+ *    算出总位移，再减去已移动的部分提交，吸附不会在逐帧增量里累积漂移；按住 Ctrl / ⌘ 临时关闭。
  */
 
 import {
   applyMatrix,
   boundsFromPoints,
   generateId,
+  unionBounds,
   type CanvasPluginContext,
   type CanvasPointerEvent,
   type Point,
@@ -29,6 +32,7 @@ import {
   type RectBounds,
   type SkyNotePlugin
 } from '@skynote/core';
+import { SNAP_THRESHOLD_PX, collectSnapTargets, drawSnapGuides, type SnapTargets } from './snapping';
 
 export const SELECTION_PLUGIN_ID = '@skynote/plugins-basic/selection';
 const MARQUEE_SESSION = 'selection:marquee';
@@ -49,7 +53,11 @@ type Gesture =
       kind: 'press';
       pointerId: number;
       startClient: Point;
-      lastWorld: Point;
+      startWorld: Point;
+      /** 已提交的总位移 */
+      moved: Point;
+      /** 开始拖动时被拖节点的世界外框与吸附候选；只拖连线时为 null */
+      snap: { bounds: RectBounds; targets: SnapTargets } | null;
       /** 按下的实体；单击 (未拖拽) 抬起时用于收窄多选 */
       target: PressTarget;
       /** 按下前该节点已被选中，且未按 Shift */
@@ -140,15 +148,36 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
       if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
       gesture.dragging = true;
       ctx.host.setCursor('move');
+      gesture.snap = this.prepareSnap();
     }
     const movable = [...ctx.session.selectedNodeIds].filter((id) => !ctx.entities.getNode(id)?.entity.locked);
-    const delta = { x: e.point.x - gesture.lastWorld.x, y: e.point.y - gesture.lastWorld.y };
-    const options = { groupId: gesture.groupId, label: '移动' };
-    const connectorIds = [...ctx.session.selectedConnectorIds].filter(
-      (id) => !ctx.entities.getConnector(id)?.entity.locked
-    );
-    ctx.document.moveEntities({ nodeIds: movable, connectorIds }, delta, options);
-    gesture.lastWorld = e.point;
+    const total = { x: e.point.x - gesture.startWorld.x, y: e.point.y - gesture.startWorld.y };
+    const { snap } = gesture;
+    if (snap && !e.modifiers.ctrl && !e.modifiers.meta) {
+      const shift = (b: RectBounds, d: Point): RectBounds => ({
+        left: b.left + d.x,
+        top: b.top + d.y,
+        right: b.right + d.x,
+        bottom: b.bottom + d.y
+      });
+      const correction = snap.targets.snapMove(
+        shift(snap.bounds, total),
+        SNAP_THRESHOLD_PX / ctx.session.viewport.zoom
+      );
+      total.x += correction.x;
+      total.y += correction.y;
+      drawSnapGuides(ctx, snap.targets.guides(shift(snap.bounds, total), true));
+    } else {
+      drawSnapGuides(ctx, null);
+    }
+    const delta = { x: total.x - gesture.moved.x, y: total.y - gesture.moved.y };
+    if (delta.x !== 0 || delta.y !== 0) {
+      const connectorIds = [...ctx.session.selectedConnectorIds].filter(
+        (id) => !ctx.entities.getConnector(id)?.entity.locked
+      );
+      ctx.document.moveEntities({ nodeIds: movable, connectorIds }, delta, { groupId: gesture.groupId, label: '移动' });
+      gesture.moved = total;
+    }
     if (movable.length > 0) gesture.dropTarget = this.updateDropTarget(movable, e.point);
   }
 
@@ -191,13 +220,27 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
       kind: 'press',
       pointerId: e.pointerId,
       startClient: e.clientPoint,
-      lastWorld: e.point,
+      startWorld: e.point,
+      moved: { x: 0, y: 0 },
+      snap: null,
       target,
       wasSelected: wasSelected && !e.modifiers.shift,
       dragging: false,
       groupId: generateId('drag'),
       dropTarget: undefined
     };
+  }
+
+  /** 被拖的最顶层未锁定节点的整体外框与吸附候选 */
+  private prepareSnap(): { bounds: RectBounds; targets: SnapTargets } | null {
+    const { ctx } = this;
+    const selected = ctx.session.selectedNodeIds;
+    const ids = [...selected].filter(
+      (id) => !ctx.entities.getNode(id)?.entity.locked && !ctx.entities.getAncestorIds(id).some((a) => selected.has(a))
+    );
+    if (ids.length === 0) return null;
+    const bounds = ids.map((id) => ctx.spatial.getBounds(id)!).reduce(unionBounds);
+    return { bounds, targets: collectSnapTargets(ctx, ids) };
   }
 
   private drawMarquee(rect: RectBounds): void {
@@ -278,6 +321,7 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
     const { host } = this.ctx;
     host.overlay.clear(MARQUEE_SESSION);
     host.overlay.clear(DROP_TARGET_SESSION);
+    drawSnapGuides(this.ctx, null);
     host.releasePointer(pointerId);
     host.setCursor('default');
     this.gesture = null;
