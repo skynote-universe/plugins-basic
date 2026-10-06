@@ -74,7 +74,7 @@ interface HandleDrag {
 function handleCursor(handle: ConnectorHandle): CanvasCursor {
   if (handle.kind === 'label') return 'move';
   if (handle.kind !== 'segment') return 'crosshair';
-  return handle.axis === 'x' ? 'ew-resize' : 'ns-resize';
+  return { kind: 'resize', angle: handle.axis === 'x' ? 0 : 90 };
 }
 
 export class ConnectorEditPlugin implements SkyNotePlugin, PointerHooks {

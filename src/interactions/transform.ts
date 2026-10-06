@@ -36,10 +36,9 @@ import {
   type PointerHooks,
   type RectBounds,
   type ResizeHandle,
+  type AngledCursor,
   type SessionChange,
   type SkyNotePlugin,
-  type RotateCursor,
-  type SystemCursor,
   type WorldFrame
 } from '@skynote/core';
 
@@ -71,8 +70,6 @@ const HANDLE_SIGNS: Record<ResizeHandle, { x: -1 | 0 | 1; y: -1 | 0 | 1 }> = {
   sw: { x: -1, y: 1 },
   w: { x: -1, y: 0 }
 };
-/** 按屏幕方向角 (0° 为向右，每 45° 一档) 取缩放光标 */
-const RESIZE_CURSORS: readonly SystemCursor[] = ['ew-resize', 'nwse-resize', 'ns-resize', 'nesw-resize'];
 
 /** 当前选区的变换外框 */
 interface SelectionFrame {
@@ -101,7 +98,7 @@ type Gesture =
 type HandleHit = { kind: 'resize'; handle: ResizeHandle } | { kind: 'rotate' };
 
 /** 旋转光标朝向指针相对旋转中心的方位，弧线背向中心 (光标图形 0° 时弧线在左，对应指针在中心左方) */
-function rotateCursor(center: Point, point: Point): RotateCursor {
+function rotateCursor(center: Point, point: Point): AngledCursor {
   return { kind: 'rotate', angle: (Math.atan2(point.y - center.y, point.x - center.x) * 180) / Math.PI - 180 };
 }
 
@@ -435,7 +432,7 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
 
   // ================= 光标与绘制 =================
 
-  /** 悬停在控制柄上时显示对应光标 (方向随外框旋转取最接近的一档)，离开时复位 */
+  /** 悬停在控制柄上时显示对应光标 (缩放光标精确对准控制柄方向，随外框旋转)，离开时复位 */
   private updateHoverCursor(e: CanvasPointerEvent): void {
     const selection = this.selection;
     const hit = selection && !e.isClaimed ? this.hitHandle(selection, e.point) : null;
@@ -451,8 +448,7 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     }
     const sign = HANDLE_SIGNS[hit.handle];
     const angle = (Math.atan2(sign.y, sign.x) * 180) / Math.PI + selection.frame.rotation;
-    const step = ((Math.round(angle / 45) % 4) + 4) % 4;
-    this.ctx.host.setCursor(RESIZE_CURSORS[step]);
+    this.ctx.host.setCursor({ kind: 'resize', angle });
   }
 
   private onSessionChange(change: SessionChange): void {

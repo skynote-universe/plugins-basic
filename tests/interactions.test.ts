@@ -16,7 +16,7 @@ import {
   type OverlayChannel,
   type OverlayOptions,
   type Point,
-  type SystemCursor,
+  type CanvasCursor,
   type TextInputSession
 } from '@skynote/core';
 import {
@@ -32,7 +32,7 @@ import {
 /** 记录覆盖层、光标与指针捕获的假宿主 */
 class FakeHost implements CanvasHost, OverlayChannel {
   readonly sessions = new Map<string, { primitives: readonly CanvasPrimitive[]; transient: boolean }>();
-  readonly cursors: SystemCursor[] = [];
+  readonly cursors: CanvasCursor[] = [];
   readonly captured = new Set<number>();
 
   get overlay(): OverlayChannel {
@@ -48,7 +48,7 @@ class FakeHost implements CanvasHost, OverlayChannel {
     this.sessions.delete(sessionId);
   }
 
-  setCursor(cursor: SystemCursor): void {
+  setCursor(cursor: CanvasCursor): void {
     this.cursors.push(cursor);
   }
 
@@ -482,6 +482,15 @@ describe('缩放控制柄', () => {
     // 右边中点向右 20，Alt 时左边同步外扩 20
     drag(engine, { x: 240, y: 75 }, { x: 260, y: 75 }, { alt: true });
     expect(store.getNode('a')).toMatchObject({ x: -20, y: 0, width: 280, height: 150 });
+  });
+
+  it('悬停控制柄时的缩放光标精确对准控制柄方向，随节点旋转 (不再只有四个方向)', () => {
+    const { engine, store, cursors } = setup();
+    store.updateNode('a', { rotation: 30 }, { undoable: false });
+    click(engine, { x: 80, y: 50 });
+    // 本地右边中点 (160, 50) 绕中心 (80, 50) 转 30° 后位于世界 (80 + 80cos30°, 50 + 80sin30°)
+    pointer(engine, 'move', { x: 80 + 80 * Math.cos(Math.PI / 6), y: 50 + 80 * Math.sin(Math.PI / 6) });
+    expect(cursors.at(-1)).toEqual({ kind: 'resize', angle: expect.closeTo(30) });
   });
 
   it('旋转后的节点沿自身坐标轴缩放，对角在世界中保持不动', () => {
