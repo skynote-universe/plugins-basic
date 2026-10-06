@@ -5,7 +5,7 @@
  * 设计考量 (Why):
  * 1. 全部注册到焦点栈 (ADR-005)，只在画布持有焦点时生效；文本编辑等更高优先级作用域先行消费，
  *    打字时的 Backspace、方向键不会误删节点或移动节点。
- * 2. 操作选区中的节点，锁定节点不参与删除、移动、复制与层级调整；锁定开关作用于全部选中节点 (否则无法解锁)。
+ * 2. 操作选区中的节点与连线，锁定的不参与删除、移动、复制与层级调整；锁定开关作用于全部选中节点 (否则无法解锁)。
  * 3. 锁定用 Ctrl+Shift+L：Ctrl+L 是浏览器聚焦地址栏的快捷键，常被浏览器或扩展抢先处理。
  * 4. Esc 清空选区后不消费按键，让更低优先级的兜底 (清除瞬态图元) 继续执行。
  */
@@ -13,6 +13,7 @@
 import {
   isAspectLocked,
   type CanvasKeyboardEvent,
+  type EntityIds,
   type CanvasPluginContext,
   type LayerMove,
   type SkyNotePlugin
@@ -53,25 +54,38 @@ export class EditingShortcutsPlugin implements SkyNotePlugin {
     } else if (mod && e.code === 'KeyY') {
       document.redo();
     } else if (mod && e.code === 'KeyA') {
-      session.setSelection({ nodeIds: entities.getChildIds(undefined), connectorIds: [] });
+      session.setSelection({
+        nodeIds: entities.getChildIds(undefined),
+        connectorIds: entities.getAllConnectors().map((runtime) => runtime.entity.id)
+      });
     } else if (mod && !e.shiftKey && e.code === 'KeyD') {
-      const ids = this.editableSelection();
-      if (ids.length === 0) return false;
-      const copies = document.duplicateNodes(ids, DUPLICATE_OFFSET);
-      if (copies.length > 0) session.setSelection({ nodeIds: copies, connectorIds: [] });
+      const refs = this.editableEntities();
+      if (refs.nodeIds.length + refs.connectorIds.length === 0) return false;
+      const copies = document.duplicateEntities(refs, DUPLICATE_OFFSET);
+      if (copies.nodeIds.length + copies.connectorIds.length > 0) session.setSelection(copies);
     } else if (mod && e.shiftKey && e.code === 'KeyL') {
-      const ids = [...session.selectedNodeIds];
-      if (ids.length === 0) return false;
+      const nodeIds = [...session.selectedNodeIds];
+      const connectorIds = [...session.selectedConnectorIds];
+      if (nodeIds.length + connectorIds.length === 0) return false;
       // 全部已锁定时解锁，否则全部锁定 (与工具栏、右键菜单一致)
-      const locked = !ids.every((id) => entities.getNode(id)!.entity.locked);
-      document.updateNodes(ids, { locked }, { label: locked ? '锁定节点' : '解锁节点' });
+      const locked = !(
+        nodeIds.every((id) => entities.getNode(id)!.entity.locked) &&
+        connectorIds.every((id) => entities.getConnector(id)!.entity.locked)
+      );
+      document.batch(
+        () => {
+          document.updateNodes(nodeIds, { locked });
+          document.updateConnectors(connectorIds, { locked });
+        },
+        locked ? '锁定' : '解锁'
+      );
     } else if (e.key === 'Escape') {
       session.setSelection({ nodeIds: [], connectorIds: [] });
       return false;
     } else if (!mod && (e.key === 'Delete' || e.key === 'Backspace')) {
-      const ids = this.editableSelection();
-      if (ids.length === 0) return false;
-      document.removeNodes(ids);
+      const refs = this.editableEntities();
+      if (refs.nodeIds.length + refs.connectorIds.length === 0) return false;
+      document.removeEntities(refs);
     } else if (!mod && (e.code === 'BracketRight' || e.code === 'BracketLeft')) {
       const ids = this.editableSelection();
       if (ids.length === 0) return false;
@@ -88,11 +102,11 @@ export class EditingShortcutsPlugin implements SkyNotePlugin {
       });
       document.setAspectLocked(ids, !allLocked);
     } else if (!mod && e.key in ARROW_DELTAS) {
-      const ids = this.editableSelection();
-      if (ids.length === 0) return false;
+      const refs = this.editableEntities();
+      if (refs.nodeIds.length + refs.connectorIds.length === 0) return false;
       const step = e.shiftKey ? NUDGE_STEP_LARGE : NUDGE_STEP;
       const direction = ARROW_DELTAS[e.key];
-      document.moveNodes(ids, { x: direction.x * step, y: direction.y * step }, { label: '微移节点' });
+      document.moveEntities(refs, { x: direction.x * step, y: direction.y * step }, { label: '微移' });
     } else {
       return false;
     }
@@ -105,5 +119,14 @@ export class EditingShortcutsPlugin implements SkyNotePlugin {
   private editableSelection(): string[] {
     const { session, entities } = this.ctx;
     return [...session.selectedNodeIds].filter((id) => !entities.getNode(id)?.entity.locked);
+  }
+
+  /** 选区中未锁定的节点与连线 */
+  private editableEntities(): EntityIds {
+    const { session, entities } = this.ctx;
+    return {
+      nodeIds: this.editableSelection(),
+      connectorIds: [...session.selectedConnectorIds].filter((id) => !entities.getConnector(id)?.entity.locked)
+    };
   }
 }

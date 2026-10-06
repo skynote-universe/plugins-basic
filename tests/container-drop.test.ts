@@ -143,7 +143,7 @@ describe('画框标题', () => {
     pointer(engine, 'down', { x: 505, y: -8 });
     pointer(engine, 'up', { x: 505, y: -8 });
     pointer(engine, 'down', { x: 505, y: -8 }, 2);
-    expect(engine.session.textEditing).toMatchObject({ nodeId: 'F', blockId: 'title' });
+    expect(engine.session.textEditing).toMatchObject({ kind: 'node', id: 'F', blockId: 'title' });
     expect(store.getNode('F')!.textBlocks![0].runs[0].text).toBe('画框');
   });
 });

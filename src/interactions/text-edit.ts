@@ -17,10 +17,13 @@
  *    界面只调用同一组方法。
  * 7. 删空即删除：节点类型声明 removeWhenEmpty (自由文本) 时，退出编辑文字为空则删除节点，与编辑同组撤销。
  * 8. 与其他插件零耦合：编辑目标写入会话 (textEditing)，渲染器据此显示编辑视图，变换控制柄据此隐藏。
+ * 9. 文字可以属于节点或连线 (ADR-125)：两者只在「文字块从哪来、图元在哪个坐标系」上不同 (OwnerText)，
+ *    光标、选区、输入法与格式完全共用。双击线上的文字编辑它，双击线上别处新加一段，删空即移除。
  */
 
 import {
   CLEAR_FORMAT_PATCH,
+  IDENTITY_MATRIX,
   applyMatrix,
   applyRunStyle,
   caretRect,
@@ -30,6 +33,7 @@ import {
   generateId,
   getRunsText,
   hitTestText,
+  isPointInBounds,
   invertMatrix,
   layoutText,
   transformBounds,
@@ -40,6 +44,7 @@ import {
   paragraphsRange,
   parseRichTextRuns,
   previousWordBoundary,
+  projectOntoPolyline,
   replaceRuns,
   replaceText,
   runStyleAt,
@@ -56,6 +61,7 @@ import {
   type CanvasPrimitive,
   type CanvasWheelEvent,
   type CaretAffinity,
+  type ConnectorEntity,
   type DocumentChangeSet,
   type FontMeasurer,
   type Matrix2D,
@@ -106,9 +112,22 @@ const FORMAT_SHORTCUTS: Readonly<Record<string, TextFormat>> = {
   'shift+x': 'strikethrough'
 };
 
+/** 文字所属的实体类别 */
+export type TextOwnerKind = 'node' | 'connector';
+
+const COLLECTIONS: Readonly<Record<TextOwnerKind, 'nodes' | 'connectors'>> = { node: 'nodes', connector: 'connectors' };
+
+/** 实体上可编辑的文字：文字块、各块的文字图元 (实体局部坐标) 与局部到世界的矩阵 */
+interface OwnerText {
+  readonly blocks: readonly TextBlock[];
+  readonly primitives: readonly TextPrimitive[];
+  readonly toWorld: Matrix2D;
+}
+
 /** 编辑态快照 */
 export interface TextEditSnapshot {
-  readonly nodeId: string;
+  readonly kind: TextOwnerKind;
+  readonly id: string;
   readonly blockId: string;
   readonly start: number;
   readonly end: number;
@@ -130,7 +149,8 @@ export interface TextFormatState {
 }
 
 interface EditState {
-  readonly nodeId: string;
+  readonly kind: TextOwnerKind;
+  readonly id: string;
   readonly blockId: string;
   /** 编辑块所属插槽：决定是否纯文本、是否单行 */
   readonly slot: NodeTextSlotDefinition | undefined;
@@ -151,7 +171,7 @@ interface EditState {
   readonly disposeScope: () => void;
 }
 
-/** 编辑块的几何：编辑视图图元 (节点局部坐标)、其排版与节点到世界的矩阵 */
+/** 编辑块的几何：编辑视图图元 (实体局部坐标)、其排版与实体到世界的矩阵 */
 interface BlockGeometry {
   readonly primitive: TextPrimitive;
   readonly layout: TextLayout;
@@ -163,7 +183,8 @@ interface BlockGeometry {
 
 /** 一个格式目标：某个文字块的 [start, end) */
 interface FormatBlock {
-  readonly nodeId: string;
+  readonly kind: TextOwnerKind;
+  readonly id: string;
   readonly blockIndex: number;
   readonly runs: readonly RichTextRun[];
   /** 块的最终样式 (插槽默认 < 节点 < 文字块) */
@@ -216,7 +237,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     const { state } = this;
     if (!state) return null;
     const [start, end] = this.range(state);
-    return { nodeId: state.nodeId, blockId: state.blockId, start, end };
+    return { kind: state.kind, id: state.id, blockId: state.blockId, start, end };
   }
 
   /** 当前格式目标的样式；没有可设置格式的文字时为 null */
@@ -327,7 +348,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     const blocks = this.formatBlocks().filter((b) => b.fixedHeight);
     const patches: CanvasPatch[] = blocks.map((b) => ({
       op: 'set',
-      path: ['content', 'nodes', b.nodeId, 'textBlocks', b.blockIndex, 'style'],
+      path: ['content', COLLECTIONS[b.kind], b.id, 'textBlocks', b.blockIndex, 'style'],
       value: { ...b.ownStyle, verticalAlign }
     }));
     this.commitFormat(blocks, patches, '垂直对齐', 'verticalAlign');
@@ -354,8 +375,8 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     const { state } = this;
     if (state) {
       const geometry = this.geometry(state);
-      if (!geometry || !this.isInsideNode(state.nodeId, e.point, geometry)) {
-        // 点在编辑节点之外：退出编辑，交给选择等交互照常处理
+      if (!geometry || !this.isInside(state, e.point, geometry)) {
+        // 点在编辑区之外：退出编辑，交给选择等交互照常处理
         this.exit();
         return;
       }
@@ -368,9 +389,14 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       state.input.focus();
       return;
     }
-    if (e.clickCount === 2 && e.target && this.enter(e.target, e.point)) {
-      e.claimPointer(TEXT_EDIT_PLUGIN_ID);
-    }
+    if (e.clickCount !== 2) return;
+    // 节点与连线都点中时按画面层叠取最上层 (与点选一致)
+    const hit = this.ctx.hitTest(e.point);
+    const entered =
+      hit?.kind === 'connector'
+        ? !hit.connector.locked && this.enterConnector(hit.connector, e.point)
+        : !!e.target && this.enterNode(e.target, e.point);
+    if (entered) e.claimPointer(TEXT_EDIT_PLUGIN_ID);
   }
 
   onPointerMove(e: CanvasPointerEvent): void {
@@ -383,7 +409,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       this.updateAutoScroll(geometry, e.point);
       return;
     }
-    if (!e.isClaimed) this.ctx.host.setCursor(this.isInsideNode(state.nodeId, e.point, geometry) ? 'text' : 'default');
+    if (!e.isClaimed) this.ctx.host.setCursor(this.isInside(state, e.point, geometry) ? 'text' : 'default');
   }
 
   onPointerUp(e: CanvasPointerEvent): void {
@@ -403,7 +429,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     const { state } = this;
     const geometry = state && this.geometry(state);
     if (!state || !geometry || e.deltaZoom !== 0 || this.maxScroll(geometry) === 0) return;
-    if (!this.isInsideNode(state.nodeId, e.centerPoint, geometry)) return;
+    if (!this.isInside(state, e.centerPoint, geometry)) return;
     e.stopPropagation?.();
     this.scrollTo(state, geometry, state.scrollY - e.deltaPan.y / this.ctx.session.viewport.zoom);
   }
@@ -411,7 +437,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
   // ================= 进入与定位 =================
 
   /** 双击节点进入编辑：定位到点中的文字块 (都没点中时取框内的第一个)，光标放在点击处 */
-  private enter(node: Readonly<NodeEntity>, point: Point): boolean {
+  private enterNode(node: Readonly<NodeEntity>, point: Point): boolean {
     const blocks = this.textPrimitives(node);
     const toWorld = this.ctx.entities.getWorldTransform(node.id);
     const fonts = this.ctx.document.fonts;
@@ -432,7 +458,45 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       // 没点中文字时取框内的第一个文字块 (如点在便签内边距上)；框外的文字 (画框标题) 须点中才编辑
       blocks.find((p) => p.x >= 0 && p.y >= 0);
     if (!primitive) return false;
+    this.ctx.session.setSelection({ nodeIds: [node.id], connectorIds: [] });
+    const block = node.textBlocks!.find((b) => b.id === primitive.id)!;
+    this.start('node', node.id, primitive.id!, findTextSlot(block, this.ctx.nodeTypes.get(node.nodeType)), point);
+    return true;
+  }
 
+  /**
+   * 双击连线编辑线上的文字：双击在某段文字上时编辑它，双击在线上没有文字的地方时在该处新加一段；
+   * 新建与随后的输入同组撤销，什么都没输入就退出时移除
+   */
+  private enterConnector(connector: Readonly<ConnectorEntity>, point: Point): boolean {
+    const route = this.ctx.connectors.getConnectorRoute(connector.id);
+    if (!route || !this.ctx.document.fonts) return false;
+    const groupId = generateId('text-edit');
+    const hit = route.labels.find(({ bounds }) => isPointInBounds(point, bounds));
+    let blockId = hit?.blockId;
+    if (!blockId) {
+      const block = { id: generateId('label'), runs: [], position: projectOntoPolyline(route.points, point) };
+      blockId = block.id;
+      this.ctx.document.updateConnector(
+        connector.id,
+        { textBlocks: [...(connector.textBlocks ?? []), block] },
+        { label: '编辑文字', groupId }
+      );
+    }
+    this.ctx.session.setSelection({ nodeIds: [], connectorIds: [connector.id] });
+    this.start('connector', connector.id, blockId, undefined, point, groupId);
+    return true;
+  }
+
+  /** 打开输入通道与键盘作用域，进入编辑并把光标放在 point 处 */
+  private start(
+    kind: TextOwnerKind,
+    id: string,
+    blockId: string,
+    slot: NodeTextSlotDefinition | undefined,
+    point: Point,
+    groupId = generateId('text-edit')
+  ): void {
     const handler: TextInputHandler = {
       insertText: (text) => this.insertText(text),
       paste: (content) => this.paste(content),
@@ -446,12 +510,11 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
         return content;
       }
     };
-    this.ctx.session.setSelection({ nodeIds: [node.id], connectorIds: [] });
-    const block = node.textBlocks!.find((b) => b.id === primitive.id)!;
     const state: EditState = {
-      nodeId: node.id,
-      blockId: primitive.id!,
-      slot: findTextSlot(block, this.ctx.nodeTypes.get(node.nodeType)),
+      kind,
+      id,
+      blockId,
+      slot,
       anchor: 0,
       focus: 0,
       affinity: 'forward',
@@ -459,7 +522,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       typingStyle: null,
       composition: null,
       scrollY: 0,
-      groupId: generateId('text-edit'),
+      groupId,
       input: this.ctx.host.openTextInput(handler),
       disposeScope: this.ctx.registerInputScope({
         id: 'text:editing',
@@ -475,7 +538,6 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       state.affinity = hit.affinity;
     }
     this.refresh();
-    return true;
   }
 
   /** 单击定位光标 (Shift 扩展选区)，双击选词，三击选段落 */
@@ -773,7 +835,13 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     this.ctx.document.commit({
       label: '编辑文字',
       groupId: state.groupId,
-      patches: [{ op: 'set', path: ['content', 'nodes', state.nodeId, 'textBlocks', blockIndex, 'runs'], value: runs }]
+      patches: [
+        {
+          op: 'set',
+          path: ['content', COLLECTIONS[state.kind], state.id, 'textBlocks', blockIndex, 'runs'],
+          value: runs
+        }
+      ]
     });
   }
 
@@ -786,7 +854,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
   ): void {
     const patches: CanvasPatch[] = blocks.map((b) => ({
       op: 'set',
-      path: ['content', 'nodes', b.nodeId, 'textBlocks', b.blockIndex, 'runs'],
+      path: ['content', COLLECTIONS[b.kind], b.id, 'textBlocks', b.blockIndex, 'runs'],
       value: transform(b)
     }));
     this.commitFormat(blocks, patches, label, mergeKey);
@@ -803,8 +871,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     mergeKey: string | undefined
   ): void {
     if (patches.length === 0) return;
-    const key =
-      mergeKey && `${mergeKey}|${blocks.map((b) => `${b.nodeId}:${b.blockIndex}:${b.start}:${b.end}`).join()}`;
+    const key = mergeKey && `${mergeKey}|${blocks.map((b) => `${b.id}:${b.blockIndex}:${b.start}:${b.end}`).join()}`;
     const groupId = key && this.lastFormat?.key === key ? this.lastFormat.groupId : generateId('text-format');
     this.ctx.document.commit({ label, groupId, patches });
     this.lastFormat = key ? { key, groupId } : null;
@@ -817,14 +884,27 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   /**
-   * 节点类型声明 removeWhenEmpty (如自由文本) 且文字已删空时删除节点
-   * 与本次编辑同组提交：撤销一步即恢复节点与原有文字
+   * 删空即移除，与本次编辑同组提交 (撤销一步即恢复原有文字)：
+   * 节点类型声明 removeWhenEmpty (如自由文本) 时删除节点；连线移除空的那段文字
    */
   private removeIfEmpty(state: EditState): void {
-    const node = this.ctx.document.getNode(state.nodeId);
+    const { document } = this.ctx;
+    if (state.kind === 'connector') {
+      const blocks = document.getConnector(state.id)?.textBlocks;
+      if (!blocks) return;
+      const rest = blocks.filter((block) => block.id !== state.blockId || getRunsText(block.runs) !== '');
+      if (rest.length === blocks.length) return;
+      document.updateConnector(
+        state.id,
+        { textBlocks: rest.length > 0 ? rest : undefined },
+        { label: '删除空文本', groupId: state.groupId }
+      );
+      return;
+    }
+    const node = document.getNode(state.id);
     if (!node || !this.ctx.nodeTypes.get(node.nodeType)?.removeWhenEmpty) return;
     if (node.textBlocks?.some((block) => getRunsText(block.runs) !== '')) return;
-    this.ctx.document.removeNodes([state.nodeId], { label: '删除空文本', groupId: state.groupId });
+    document.removeEntities({ nodeIds: [state.id] }, { label: '删除空文本', groupId: state.groupId });
   }
 
   // ================= 格式目标 =================
@@ -832,7 +912,25 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
   /** 编辑中为选区所在文字块，否则为选中节点 (未锁定) 的全部文字块 */
   private formatBlocks(): FormatBlock[] {
     const { state } = this;
-    const nodeIds = state ? [state.nodeId] : this.ctx.session.selectedNodeIds;
+    if (state?.kind === 'connector') {
+      const geometry = this.geometry(state);
+      if (!geometry) return [];
+      const [start, end] = this.range(state);
+      return [
+        {
+          kind: 'connector',
+          id: state.id,
+          blockIndex: geometry.blockIndex,
+          runs: geometry.runs,
+          blockStyle: geometry.primitive.style,
+          ownStyle: this.ctx.document.getConnector(state.id)!.textBlocks![geometry.blockIndex].style,
+          fixedHeight: false,
+          start,
+          end: Math.min(end, getRunsText(geometry.runs).length)
+        }
+      ];
+    }
+    const nodeIds = state ? [state.id] : this.ctx.session.selectedNodeIds;
     const [start, end] = state ? this.range(state) : [0, Infinity];
     const blocks: FormatBlock[] = [];
     for (const id of nodeIds) {
@@ -847,7 +945,8 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
         // 纯文本插槽 (如画框标题) 的外观由节点类型固定，不是格式目标
         if (findTextSlot(block, definition)?.plainText) continue;
         blocks.push({
-          nodeId: id,
+          kind: 'node',
+          id,
           blockIndex,
           runs: block.runs,
           blockStyle: primitive.style,
@@ -884,19 +983,33 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     return primitives.filter((p): p is TextPrimitive => p.kind === 'text' && p.id !== undefined);
   }
 
-  private rawPrimitive(nodeId: string, blockId: string): TextPrimitive | undefined {
-    const node = this.ctx.document.getNode(nodeId);
-    return node && this.textPrimitives(node).find((p) => p.id === blockId);
+  /** 实体上的文字：节点按节点类型的 compose 生成 (节点局部坐标)；连线取路由一并排版的文字 (世界坐标) */
+  private ownerText(kind: TextOwnerKind, id: string): OwnerText | null {
+    const { document, connectors, entities } = this.ctx;
+    if (kind === 'connector') {
+      const connector = document.getConnector(id);
+      const route = connectors.getConnectorRoute(id);
+      if (!connector?.textBlocks || !route) return null;
+      return {
+        blocks: connector.textBlocks,
+        primitives: route.labels.map((label) => label.primitive),
+        toWorld: IDENTITY_MATRIX
+      };
+    }
+    const node = document.getNode(id);
+    const toWorld = entities.getWorldTransform(id);
+    if (!node?.textBlocks || !toWorld) return null;
+    return { blocks: node.textBlocks, primitives: this.textPrimitives(node), toWorld };
   }
 
   /** 编辑块的当前几何 (每次按最新文档计算：文字、尺寸或位置随时可能被撤销、协同改变) */
   private geometry(state: EditState): BlockGeometry | null {
-    const node = this.ctx.document.getNode(state.nodeId);
-    const toWorld = this.ctx.entities.getWorldTransform(state.nodeId);
+    const owner = this.ownerText(state.kind, state.id);
     const fonts = this.ctx.document.fonts;
-    const raw = this.rawPrimitive(state.nodeId, state.blockId);
-    const blockIndex = node?.textBlocks?.findIndex((b) => b.id === state.blockId) ?? -1;
-    if (!node || !toWorld || !fonts || !raw || blockIndex < 0) return null;
+    const raw = owner?.primitives.find((p) => p.id === state.blockId);
+    const blockIndex = owner?.blocks.findIndex((b) => b.id === state.blockId) ?? -1;
+    if (!owner || !fonts || !raw || blockIndex < 0) return null;
+    const { toWorld } = owner;
     const primitive = editingTextPrimitive(raw, this.editingTarget(state));
     const layout = layoutText(
       primitive.runs,
@@ -904,11 +1017,17 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       { width: primitive.width, height: primitive.height },
       fonts
     );
-    return { primitive, layout, toWorld, blockIndex, runs: node.textBlocks![blockIndex].runs };
+    return { primitive, layout, toWorld, blockIndex, runs: owner.blocks[blockIndex].runs };
   }
 
   private editingTarget(state: EditState) {
-    return { nodeId: state.nodeId, blockId: state.blockId, scrollY: state.scrollY, composition: state.composition };
+    return {
+      kind: state.kind,
+      id: state.id,
+      blockId: state.blockId,
+      scrollY: state.scrollY,
+      composition: state.composition
+    };
   }
 
   /** 光标在排版中的偏移：组合中位于组合文字末尾 */
@@ -928,13 +1047,13 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   /**
-   * 点是否落在编辑节点上：节点外框或编辑中文字的可见范围 (延展出文本框的标题、随输入伸缩的自适应文字)；
+   * 点是否落在编辑区：节点外框 (连线没有) 或编辑中文字的可见范围 (延展出文本框的标题、随输入伸缩的自适应文字)；
    * 在框内滚动的文字超出部分已裁剪，不再可点
    */
-  private isInsideNode(nodeId: string, point: Point, geometry: BlockGeometry): boolean {
-    const node = this.ctx.document.getNode(nodeId)!;
+  private isInside(state: EditState, point: Point, geometry: BlockGeometry): boolean {
     const local = applyMatrix(invertMatrix(geometry.toWorld), point.x, point.y);
-    if (local.x >= 0 && local.y >= 0 && local.x <= node.width && local.y <= node.height) return true;
+    const node = state.kind === 'node' ? this.ctx.document.getNode(state.id)! : null;
+    if (node && local.x >= 0 && local.y >= 0 && local.x <= node.width && local.y <= node.height) return true;
     const bounds = editingTextBounds(geometry.primitive, geometry.layout);
     return local.x >= bounds.left && local.y >= bounds.top && local.x <= bounds.right && local.y <= bounds.bottom;
   }
@@ -1052,8 +1171,10 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       return;
     }
     const { session } = this.ctx;
-    // 选区换成别的节点、编辑目标被外部改变时退出编辑
-    if (!session.selectedNodeIds.has(state.nodeId) || session.textEditing?.nodeId !== state.nodeId) {
+    // 选区换成别的实体、编辑目标被外部改变时退出编辑
+    const selected = state.kind === 'node' ? session.selectedNodeIds : session.selectedConnectorIds;
+    const editing = session.textEditing;
+    if (!selected.has(state.id) || editing?.kind !== state.kind || editing.id !== state.id) {
       this.exit();
       return;
     }
@@ -1062,7 +1183,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
 
   private onDocumentChange(changes: DocumentChangeSet): void {
     const { state } = this;
-    const { nodes } = changes;
+    const { nodes, connectors } = changes;
     if (!state) {
       for (const id of this.ctx.session.selectedNodeIds) {
         if (nodes.data.has(id)) {
@@ -1072,11 +1193,17 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       }
       return;
     }
-    if (nodes.removed.has(state.nodeId)) {
+    const removed = state.kind === 'node' ? nodes.removed : connectors.removed;
+    if (removed.has(state.id)) {
       this.exit();
       return;
     }
-    if (!nodes.data.has(state.nodeId) && !nodes.worldGeometry.has(state.nodeId)) return;
+    // 连线文字随路由一起排版，属于几何变更
+    const changed =
+      state.kind === 'node'
+        ? nodes.data.has(state.id) || nodes.worldGeometry.has(state.id)
+        : connectors.geometry.has(state.id) || connectors.data.has(state.id);
+    if (!changed) return;
     // 撤销、协同可能改短文字：偏移夹取到新文本内
     const geometry = this.geometry(state);
     if (!geometry) {

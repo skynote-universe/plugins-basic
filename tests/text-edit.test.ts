@@ -137,7 +137,13 @@ describe('进入与退出', () => {
     const context = setup();
     const { engine, host, store, text } = context;
     enterAt(context, 2);
-    expect(engine.session.textEditing).toMatchObject({ nodeId: 't', blockId: 'body', scrollY: 0, composition: null });
+    expect(engine.session.textEditing).toMatchObject({
+      kind: 'node',
+      id: 't',
+      blockId: 'body',
+      scrollY: 0,
+      composition: null
+    });
     expect(host.inputOpen).toBe(true);
     expect(host.sessions.has('transform:handles')).toBe(false);
     expect(host.sessions.get('text-edit')?.some((p) => p.kind === 'line')).toBe(true);
@@ -181,7 +187,7 @@ describe('进入与退出', () => {
     press(engine, { x: 250, y: 250 });
     press(engine, { x: 250, y: 250 }, 2);
 
-    expect(engine.session.textEditing).toMatchObject({ nodeId: 'rect1', blockId: 'label' });
+    expect(engine.session.textEditing).toMatchObject({ kind: 'node', id: 'rect1', blockId: 'label' });
     expect(host.inputOpen).toBe(true);
 
     host.handler!.insertText('矩形文本');
@@ -557,7 +563,8 @@ describe('段落对齐与格式目标', () => {
     press(engine, titlePoint, 2);
 
     expect(engine.session.textEditing).toMatchObject({
-      nodeId: 'f1',
+      kind: 'node',
+      id: 'f1',
       blockId: 'title'
     });
 
@@ -582,7 +589,7 @@ describe('段落对齐与格式目标', () => {
     const titlePoint: Point = { x: 260, y: 185 };
     press(engine, titlePoint, 1);
     press(engine, titlePoint, 2);
-    expect(engine.session.textEditing).toMatchObject({ nodeId: 'f1', blockId: 'title' });
+    expect(engine.session.textEditing).toMatchObject({ kind: 'node', id: 'f1', blockId: 'title' });
 
     // 在标题区域按下指针并拖拽选择文字
     const init = {
@@ -603,7 +610,7 @@ describe('段落对齐与格式目标', () => {
     const frame = store.getNode('f1')!;
     expect(frame.x).toBe(200);
     expect(frame.y).toBe(200);
-    expect(engine.session.textEditing).toMatchObject({ nodeId: 'f1', blockId: 'title' });
+    expect(engine.session.textEditing).toMatchObject({ kind: 'node', id: 'f1', blockId: 'title' });
   });
 
   it('画框标题文本超长溢出画框宽度后，在溢出部分点击与拖选依然保持编辑态', () => {
@@ -621,7 +628,7 @@ describe('段落对齐与格式目标', () => {
     const titlePoint: Point = { x: 120, y: 85 };
     press(engine, titlePoint, 1);
     press(engine, titlePoint, 2);
-    expect(engine.session.textEditing).toMatchObject({ nodeId: 'f2', blockId: 'title' });
+    expect(engine.session.textEditing).toMatchObject({ kind: 'node', id: 'f2', blockId: 'title' });
 
     // 在超出画框宽度 (100 + 100 = 200) 的溢出文字区域点击 (x: 230)
     const overflowPoint: Point = { x: 230, y: 85 };
@@ -633,7 +640,7 @@ describe('段落对齐与格式目标', () => {
     };
     engine.pointer.dispatchPointerDown(new SyntheticPointerEvent(init));
     // 依然在编辑态，没有被退出
-    expect(engine.session.textEditing).toMatchObject({ nodeId: 'f2', blockId: 'title' });
+    expect(engine.session.textEditing).toMatchObject({ kind: 'node', id: 'f2', blockId: 'title' });
 
     engine.pointer.dispatchPointerMove(new SyntheticPointerEvent({ ...init, point: { x: 250, y: 85 } }));
     engine.pointer.dispatchPointerUp(new SyntheticPointerEvent({ ...init, point: { x: 250, y: 85 } }));
@@ -641,7 +648,7 @@ describe('段落对齐与格式目标', () => {
     const frame = store.getNode('f2')!;
     expect(frame.x).toBe(100);
     expect(frame.y).toBe(100);
-    expect(engine.session.textEditing).toMatchObject({ nodeId: 'f2', blockId: 'title' });
+    expect(engine.session.textEditing).toMatchObject({ kind: 'node', id: 'f2', blockId: 'title' });
   });
 
   it('画框标题是纯文本插槽：未编辑时不作为格式目标，编辑时也没有格式可设，粘贴只取纯文本、换行替换为空格', () => {
@@ -662,7 +669,7 @@ describe('段落对齐与格式目标', () => {
     const titlePoint: Point = { x: 70, y: 35 };
     press(engine, titlePoint, 1);
     press(engine, titlePoint, 2);
-    expect(engine.session.textEditing).toMatchObject({ nodeId: 'f3', blockId: 'title' });
+    expect(engine.session.textEditing).toMatchObject({ kind: 'node', id: 'f3', blockId: 'title' });
     expect(plugin.formatState).toBeNull();
     plugin.applyStyle({ color: '$red' });
 

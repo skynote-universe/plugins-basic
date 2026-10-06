@@ -370,7 +370,7 @@ describe('选中框', () => {
     engine.session.setViewport({ zoom: 2 });
     expect((overlay.get('selection:outline')!.primitives[0] as { strokeWidth: number }).strokeWidth).toBe(0.75);
 
-    store.moveNodes(['a'], { x: 10 });
+    store.moveEntities({ nodeIds: ['a'] }, { x: 10 });
     outline = overlay.get('selection:outline')!;
     expect((outline.primitives[0] as { points: number[] }).points[0]).toBe(10);
 
@@ -399,7 +399,8 @@ describe('选中框', () => {
 
     // 模拟正在输入法中输入拼音：会话中设置 composition
     engine.session.setTextEditing({
-      nodeId: 't',
+      kind: 'node',
+      id: 't',
       blockId: 'body',
       scrollY: 0,
       composition: { offset: 1, text: "s's'd'd's", style: {} }

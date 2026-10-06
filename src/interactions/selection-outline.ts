@@ -133,7 +133,8 @@ export class SelectionOutlinePlugin implements SkyNotePlugin, PointerHooks {
       let { width, height } = entity;
 
       // 输入法组合文字只在本地显示、尚未写入文档：自适应节点的外框按含组合文字的排版伸缩，不被文字撑出
-      const editing = session.textEditing?.nodeId === id ? session.textEditing : null;
+      const target = session.textEditing;
+      const editing = target?.kind === 'node' && target.id === id ? target : null;
       if (editing?.composition && fonts) {
         const size = computeTextLayout(this.withComposition(entity, editing), nodeTypes.get(entity.nodeType), fonts);
         if (size) ({ width, height } = size);

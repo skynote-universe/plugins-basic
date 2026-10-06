@@ -6,3 +6,5 @@ export * from './transform';
 export * from './text-edit';
 export * from './text-format';
 export * from './clipboard';
+export * from './connector-tool';
+export * from './connector-edit';

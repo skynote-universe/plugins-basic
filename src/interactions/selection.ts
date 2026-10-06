@@ -11,7 +11,11 @@
  *    松手时改挂到该容器，落在空白处移出到根层级；改挂与移动同组提交，一步撤销。只改挂原本位于根层级或可接收容器中的节点，
  *    组合等不接收拖入的父节点中的子节点不会被拖出。
  * 5. 框选选中与选框相交的根层级节点 (命中容器内部的子节点时选中其所在的根层级容器)，结果可预期；
- *    进入容器内部选择留给双击进入等后续交互。
+ *    进入容器内部选择留给双击进入等后续交互。连线须整条落在选框内才选中 (与 FigJam 一致)，
+ *    否则框选几个节点时会顺带选中穿过选框的长连线。
+ * 6. 节点与连线都点中时按画面层叠取最上层 (与渲染同一规则)：穿过画框的连线画在画框之上，点线即选线；
+ *    盖住连线的无关节点优先。
+ *    拖动时选中连线的自由端与手动拐点随之平移，连在节点上的一端跟随节点。
  */
 
 import {
@@ -20,7 +24,6 @@ import {
   generateId,
   type CanvasPluginContext,
   type CanvasPointerEvent,
-  type NodeEntity,
   type Point,
   type PointerHooks,
   type RectBounds,
@@ -35,14 +38,20 @@ const DROP_TARGET_STROKE_PX = 2;
 /** 超过该屏幕距离才视为拖拽 */
 const DRAG_THRESHOLD_PX = 3;
 
+/** 按下的实体：节点或连线 */
+interface PressTarget {
+  kind: 'node' | 'connector';
+  id: string;
+}
+
 type Gesture =
   | {
       kind: 'press';
       pointerId: number;
       startClient: Point;
       lastWorld: Point;
-      /** 按下的节点；单击 (未拖拽) 抬起时用于收窄多选 */
-      nodeId: string;
+      /** 按下的实体；单击 (未拖拽) 抬起时用于收窄多选 */
+      target: PressTarget;
       /** 按下前该节点已被选中，且未按 Shift */
       wasSelected: boolean;
       dragging: boolean;
@@ -55,8 +64,11 @@ type Gesture =
       pointerId: number;
       startWorld: Point;
       /** Shift 框选时保留原有选区 */
-      baseSelection: ReadonlySet<string>;
+      baseNodes: ReadonlySet<string>;
+      baseConnectors: ReadonlySet<string>;
     };
+
+const selectionKey = (kind: PressTarget['kind']) => (kind === 'node' ? 'nodeIds' : 'connectorIds');
 
 export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
   readonly id = SELECTION_PLUGIN_ID;
@@ -76,14 +88,26 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
 
   onPointerDown(e: CanvasPointerEvent): void {
     if (e.isClaimed || e.button !== 0 || this.gesture) return;
-    const node = e.target;
-    if (node) {
-      this.pressNode(node, e);
+    const hit = this.ctx.hitTest(e.point);
+    const target: PressTarget | null =
+      hit?.kind === 'connector'
+        ? { kind: 'connector', id: hit.connector.id }
+        : e.target
+          ? { kind: 'node', id: e.target.id }
+          : null;
+    if (target) {
+      this.press(target, e);
     } else {
       const { session } = this.ctx;
-      const baseSelection = e.modifiers.shift ? new Set(session.selectedNodeIds) : new Set<string>();
-      if (!e.modifiers.shift) session.setSelection({ nodeIds: [], connectorIds: [] });
-      this.gesture = { kind: 'marquee', pointerId: e.pointerId, startWorld: e.point, baseSelection };
+      const shift = e.modifiers.shift;
+      if (!shift) session.setSelection({ nodeIds: [], connectorIds: [] });
+      this.gesture = {
+        kind: 'marquee',
+        pointerId: e.pointerId,
+        startWorld: e.point,
+        baseNodes: shift ? new Set(session.selectedNodeIds) : new Set(),
+        baseConnectors: shift ? new Set(session.selectedConnectorIds) : new Set()
+      };
     }
     if (!this.gesture) return;
     e.claimPointer(SELECTION_PLUGIN_ID);
@@ -97,9 +121,16 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
     if (gesture.kind === 'marquee') {
       const rect = boundsFromPoints(gesture.startWorld, e.point);
       this.drawMarquee(rect);
-      const hits = new Set(gesture.baseSelection);
-      for (const id of ctx.spatial.search(rect)) hits.add(ctx.entities.getAncestorIds(id).at(-1) ?? id);
-      ctx.session.setSelection({ nodeIds: hits, connectorIds: [] });
+      const nodeHits = new Set(gesture.baseNodes);
+      for (const id of ctx.spatial.search(rect)) nodeHits.add(ctx.entities.getAncestorIds(id).at(-1) ?? id);
+      const connectorHits = new Set(gesture.baseConnectors);
+      for (const id of ctx.connectors.connectorSpatialIndex.search(rect)) {
+        const b = ctx.connectors.getConnectorRoute(id)!.bounds;
+        if (b.left >= rect.left && b.right <= rect.right && b.top >= rect.top && b.bottom <= rect.bottom) {
+          connectorHits.add(id);
+        }
+      }
+      ctx.session.setSelection({ nodeIds: nodeHits, connectorIds: connectorHits });
       return;
     }
 
@@ -111,13 +142,14 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
       ctx.host.setCursor('move');
     }
     const movable = [...ctx.session.selectedNodeIds].filter((id) => !ctx.entities.getNode(id)?.entity.locked);
-    ctx.document.moveNodes(
-      movable,
-      { x: e.point.x - gesture.lastWorld.x, y: e.point.y - gesture.lastWorld.y },
-      { groupId: gesture.groupId, label: '移动节点' }
+    const delta = { x: e.point.x - gesture.lastWorld.x, y: e.point.y - gesture.lastWorld.y };
+    const options = { groupId: gesture.groupId, label: '移动' };
+    const connectorIds = [...ctx.session.selectedConnectorIds].filter(
+      (id) => !ctx.entities.getConnector(id)?.entity.locked
     );
+    ctx.document.moveEntities({ nodeIds: movable, connectorIds }, delta, options);
     gesture.lastWorld = e.point;
-    gesture.dropTarget = this.updateDropTarget(movable, e.point);
+    if (movable.length > 0) gesture.dropTarget = this.updateDropTarget(movable, e.point);
   }
 
   onPointerUp(e: CanvasPointerEvent): void {
@@ -125,7 +157,11 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
     if (!gesture || gesture.pointerId !== e.pointerId) return;
     // 在多选中单击其中一个 (未拖拽)：收窄为只选它
     if (gesture.kind === 'press' && !gesture.dragging && gesture.wasSelected) {
-      this.ctx.session.setSelection({ nodeIds: [gesture.nodeId], connectorIds: [] });
+      this.ctx.session.setSelection({
+        nodeIds: [],
+        connectorIds: [],
+        [selectionKey(gesture.target.kind)]: [gesture.target.id]
+      });
     }
     if (gesture.kind === 'press' && gesture.dragging) this.drop(gesture.dropTarget, gesture.groupId);
     this.finish(e.pointerId);
@@ -136,26 +172,27 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
     if (this.gesture?.pointerId === e.pointerId) this.finish(e.pointerId);
   }
 
-  private pressNode(node: Readonly<NodeEntity>, e: CanvasPointerEvent): void {
+  private press(target: PressTarget, e: CanvasPointerEvent): void {
     const { session } = this.ctx;
-    const selected = session.selectedNodeIds;
-    const wasSelected = selected.has(node.id);
+    const key = selectionKey(target.kind);
+    const selected = target.kind === 'node' ? session.selectedNodeIds : session.selectedConnectorIds;
+    const wasSelected = selected.has(target.id);
     if (e.modifiers.shift) {
       const next = new Set(selected);
-      if (wasSelected) next.delete(node.id);
-      else next.add(node.id);
-      session.setSelection({ nodeIds: next, connectorIds: [] });
-      // Shift 点掉一个节点后不再拖拽它
+      if (wasSelected) next.delete(target.id);
+      else next.add(target.id);
+      session.setSelection({ [key]: next });
+      // Shift 点掉一个后不再拖拽它
       if (wasSelected) return;
     } else if (!wasSelected) {
-      session.setSelection({ nodeIds: [node.id], connectorIds: [] });
+      session.setSelection({ nodeIds: [], connectorIds: [], [key]: [target.id] });
     }
     this.gesture = {
       kind: 'press',
       pointerId: e.pointerId,
       startClient: e.clientPoint,
       lastWorld: e.point,
-      nodeId: node.id,
+      target,
       wasSelected: wasSelected && !e.modifiers.shift,
       dragging: false,
       groupId: generateId('drag'),

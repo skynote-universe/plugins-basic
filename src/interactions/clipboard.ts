@@ -26,6 +26,7 @@ import {
   type CanvasPluginContext,
   type ClipboardData,
   type ClipboardHandler,
+  type EntityRefs,
   type NodeClipboardPayload,
   type RectBounds,
   type SkyNotePlugin
@@ -79,17 +80,21 @@ export class ClipboardPlugin implements SkyNotePlugin, ClipboardHandler, Pointer
   }
 
   copy(): ClipboardData | null {
-    const data = this.serialize([...this.ctx.session.selectedNodeIds]);
+    const { session } = this.ctx;
+    const data = this.serialize({ nodeIds: session.selectedNodeIds, connectorIds: session.selectedConnectorIds });
     if (data) this.series = { key: data[NODE_CLIPBOARD_MIME], anchor: null, count: 0, pointer: this.pointer };
     return data;
   }
 
   cut(): ClipboardData | null {
     const { session, entities, document } = this.ctx;
-    const ids = [...session.selectedNodeIds].filter((id) => !entities.getNode(id)?.entity.locked);
-    const data = this.serialize(ids);
+    const refs = {
+      nodeIds: [...session.selectedNodeIds].filter((id) => !entities.getNode(id)?.entity.locked),
+      connectorIds: [...session.selectedConnectorIds].filter((id) => !entities.getConnector(id)?.entity.locked)
+    };
+    const data = this.serialize(refs);
     if (!data) return null;
-    document.removeNodes(ids, { label: '剪切' });
+    document.removeEntities(refs, { label: '剪切' });
     this.series = { key: data[NODE_CLIPBOARD_MIME], anchor: null, count: -1, pointer: this.pointer };
     return data;
   }
@@ -97,28 +102,30 @@ export class ClipboardPlugin implements SkyNotePlugin, ClipboardHandler, Pointer
   paste(data: ClipboardData): boolean {
     const json = data[NODE_CLIPBOARD_MIME];
     const parsed = json === undefined ? null : parseNodeClipboard(json);
-    if (parsed?.ok) return this.pasteNodes(json, parsed.value);
+    if (parsed?.ok) return this.pasteContent(json, parsed.value);
     const text = data['text/plain']?.trim();
     return text ? this.pasteText(text) : false;
   }
 
-  /** 选中节点 → 画布节点数据 + 节点中的文字；没有可复制的节点时为 null */
-  private serialize(nodeIds: string[]): Record<string, string> | null {
-    const payload = this.ctx.document.copyNodes(nodeIds);
+  /** 选中实体 → 画布数据 + 节点与连线上的文字；没有可复制的内容时为 null */
+  private serialize(refs: EntityRefs): Record<string, string> | null {
+    const payload = this.ctx.document.copyEntities(refs);
     if (!payload) return null;
-    const text = payload.nodes
-      .flatMap((node) => node.textBlocks ?? [])
+    // 节点与连线上的文字依次成行，粘贴到外部应用时内容不丢
+    const text = [...payload.nodes, ...payload.connectors]
+      .flatMap((entity) => entity.textBlocks ?? [])
       .map(getPlainText)
       .filter((line) => line !== '')
       .join('\n');
     return { [NODE_CLIPBOARD_MIME]: JSON.stringify(payload), 'text/plain': text };
   }
 
-  private pasteNodes(key: string, payload: NodeClipboardPayload): boolean {
+  private pasteContent(key: string, payload: NodeClipboardPayload): boolean {
     const { session, document } = this.ctx;
-    const ids = document.pasteNodes(payload, this.placeSeries(key, this.boundsOf(payload)));
-    if (ids.length > 0) session.setSelection({ nodeIds: ids, connectorIds: [] });
-    return ids.length > 0;
+    const ids = document.pasteEntities(payload, this.placeSeries(key, this.boundsOf(payload)));
+    const pasted = ids.nodeIds.length + ids.connectorIds.length > 0;
+    if (pasted) session.setSelection(ids);
+    return pasted;
   }
 
   /**
@@ -166,12 +173,17 @@ export class ClipboardPlugin implements SkyNotePlugin, ClipboardHandler, Pointer
     return id !== null;
   }
 
-  /** 剪贴板中最顶层节点 (根层级世界位姿) 的整体外接框 */
+  /** 剪贴板内容的整体外接框：最顶层节点 (根层级世界位姿)、连线的自由端与手动拐点 */
   private boundsOf(payload: NodeClipboardPayload): RectBounds {
     const ids = new Set(payload.nodes.map((node) => node.id));
-    return payload.nodes
+    const boxes = payload.nodes
       .filter((node) => node.parentId === undefined || !ids.has(node.parentId))
-      .map((node) => computeNodeWorldBounds(node, computeNodeLocalMatrix(node)))
-      .reduce((union, b) => unionBounds(union, b));
+      .map((node) => computeNodeWorldBounds(node, computeNodeLocalMatrix(node)));
+    for (const c of payload.connectors) {
+      const points = [c.from.position, c.to.position, ...(c.controlPoints ?? [])];
+      for (const p of points) if (p) boxes.push({ left: p.x, top: p.y, right: p.x, bottom: p.y });
+    }
+    // 外部数据可能只有连在缺失节点上的连线 (粘贴时会被跳过)，此时没有可定位的内容
+    return boxes.reduce((union, b) => unionBounds(union, b), boxes[0] ?? { left: 0, top: 0, right: 0, bottom: 0 });
   }
 }
