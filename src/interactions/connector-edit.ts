@@ -14,6 +14,7 @@
 import {
   generateId,
   displayedConnectorLabel,
+  isDerivedConnectorId,
   isPointInBounds,
   pointAlongPolyline,
   projectOntoPolyline,
@@ -237,7 +238,7 @@ export class ConnectorEditPlugin implements SkyNotePlugin, PointerHooks {
     const connector = this.ctx.document.getConnector(connectorId)!;
     const tolerance = HANDLE_HIT_PX / this.ctx.session.viewport.zoom;
     // 端点最优先；文字其次 (文字默认在线的正中，会盖住段中点手柄，拖文字比拖段更常用)；最后是拐点与段中点
-    const near = connectorHandles(connector, route, this.ctx.session.viewport.zoom).filter(
+    const near = this.geometryHandles(connector, route).filter(
       ({ point: p }) => Math.hypot(p.x - point.x, p.y - point.y) <= tolerance
     );
     const handle = near.find((h) => h.kind === 'end') ?? this.hitLabel(route, point) ?? near[0];
@@ -334,10 +335,17 @@ export class ConnectorEditPlugin implements SkyNotePlugin, PointerHooks {
     const editable = this.editableConnector();
     const route = editable && ctx.connectors.getConnectorRoute(editable);
     if (route) {
-      const handles = connectorHandles(ctx.document.getConnector(editable)!, route, viewport.zoom).reverse();
+      const handles = this.geometryHandles(ctx.document.getConnector(editable)!, route).reverse();
       for (const handle of handles) primitives.push(this.handlePrimitive(handle, unit));
     }
     ctx.host.overlay.setPrimitives(SELECTED_SESSION, primitives);
+  }
+
+  /**
+   * 端点、拐点与线段手柄；派生连线 (如导图分支线) 的几何由来源决定，不提供这些手柄，只保留线上文字的拖动
+   */
+  private geometryHandles(connector: Readonly<ConnectorEntity>, route: ComputedRoute): ConnectorHandle[] {
+    return isDerivedConnectorId(connector.id) ? [] : connectorHandles(connector, route, this.ctx.session.viewport.zoom);
   }
 
   /**

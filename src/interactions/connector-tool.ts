@@ -39,6 +39,7 @@ import {
   type SessionChange,
   type SkyNotePlugin
 } from '@skynote/core';
+import { isInInstalledLayout } from '../layout/layout-membership';
 import { connectorTargetHints, routeOutline } from './connector-hints';
 
 export const CONNECTOR_TOOL_PLUGIN_ID = '@skynote/plugins-basic/connector-tool';
@@ -344,7 +345,10 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
 
   // ==================== 「+」快速连接 ====================
 
-  /** 选择工具下单独选中一个可连接的节点、没有在编辑文字与拖动时，节点四边显示「+」 */
+  /**
+   * 选择工具下单独选中一个可连接的节点、没有在编辑文字与拖动时，节点四边显示「+」
+   * 布局树 (如思维导图) 中的节点不显示：它们的位置与连线由布局决定，新增分支用布局自己的方式 (如 Tab)
+   */
   private drawPlus(): void {
     const { ctx } = this;
     const { session } = ctx;
@@ -362,7 +366,8 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
       session.selectedConnectorIds.size > 0 ||
       session.textEditing ||
       definition?.acceptsChildren ||
-      definition?.removeWhenEmpty
+      definition?.removeWhenEmpty ||
+      isInInstalledLayout(ctx, node.id)
     ) {
       this.clearPlus();
       return;

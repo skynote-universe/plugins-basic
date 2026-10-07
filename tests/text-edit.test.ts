@@ -199,6 +199,61 @@ describe('进入与退出', () => {
   });
 });
 
+describe('编辑请求与单行文字的 Tab', () => {
+  it('其他插件经会话请求编辑：进入该节点第一个文字块并全选，接着输入即替换；锁定的节点不响应', () => {
+    const ctx = setup();
+    const { engine, store, plugin, host, text } = ctx;
+    engine.session.requestTextEditing('t');
+    expect(plugin.snapshot).toMatchObject({ start: 0, end: 11 });
+    expect([...engine.session.selectedNodeIds]).toEqual(['t']);
+    host.handler!.insertText('hi');
+    expect(text()).toBe('hi');
+
+    key(engine, 'Escape');
+    store.updateNode('t', { locked: true });
+    engine.session.requestTextEditing('t');
+    expect(plugin.snapshot).toBeNull();
+  });
+
+  it('选中单个节点按 Enter 或 F2 进入编辑并全选；多选或未选中时不响应', () => {
+    const { engine, store, plugin } = setup();
+    engine.session.setSelection({ nodeIds: ['t'], connectorIds: [] });
+    expect(key(engine, 'Enter')).toBe(true);
+    expect(plugin.snapshot).toMatchObject({ id: 't', start: 0, end: 11 });
+    key(engine, 'Escape');
+    expect(plugin.snapshot).toBeNull();
+    key(engine, 'F2');
+    expect(plugin.snapshot).toMatchObject({ id: 't' });
+    key(engine, 'Escape');
+
+    const other = store.createNode({ nodeType: 'free-text', x: 400, y: 400, options: { text: 'x' } })!;
+    engine.session.setSelection({ nodeIds: ['t', other], connectorIds: [] });
+    expect(key(engine, 'F2')).toBe(false);
+    engine.session.setSelection({ nodeIds: [], connectorIds: [] });
+    expect(key(engine, 'Enter')).toBe(false);
+    expect(plugin.snapshot).toBeNull();
+  });
+
+  it('单行文字 (画框标题) 编辑时 Tab 确认并退出、按键继续下传；多行文字里 Tab 仍归编辑器', () => {
+    const { engine, store, plugin } = setup();
+    store.createNode({ nodeType: 'frame', id: 'f', x: 400, y: 400, options: { title: '画框' } });
+    engine.session.requestTextEditing('f');
+    expect(plugin.snapshot).not.toBeNull();
+    const below = vi.fn(() => true);
+    engine.inputScopes.pushScope({ id: 'test:below', priority: 1, onKeyDown: below });
+    key(engine, 'Tab');
+    expect(plugin.snapshot).toBeNull();
+    expect(below).toHaveBeenCalled();
+
+    below.mockClear();
+    engine.session.requestTextEditing('t');
+    key(engine, 'Tab');
+    expect(plugin.snapshot).not.toBeNull();
+    expect(below).not.toHaveBeenCalled();
+    engine.inputScopes.popScope('test:below');
+  });
+});
+
 describe('删空即删除', () => {
   it('自由文本删空后退出编辑即删除节点，撤销一步恢复节点与原文字；便签删空保留', () => {
     const context = setup();

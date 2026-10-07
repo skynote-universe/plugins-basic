@@ -20,6 +20,7 @@ import {
 } from '@skynote/core';
 import {
   BasicNodesPlugin,
+  BranchConnectorsPlugin,
   CONNECTOR_TOOL,
   ConnectorEditPlugin,
   ConnectorToolPlugin,
@@ -416,6 +417,39 @@ describe('快速连接', () => {
     expect(host.sessions.has('connector-tool:plus')).toBe(false);
     store.createNode({ nodeType: 'frame', id: 'f', x: 0, y: 500 });
     engine.session.setSelection({ nodeIds: ['f'] });
+    expect(host.sessions.has('connector-tool:plus')).toBe(false);
+  });
+});
+
+describe('布局树中的节点', () => {
+  it('选中派生连线 (如布局分支线) 只有选中描边，没有端点与拐点手柄', () => {
+    const { engine, store, host } = setup();
+    engine.use(new BranchConnectorsPlugin());
+    store.updateNode('a', { layout: { type: 'test:none' } });
+    store.updateNode('b', { parentId: 'a', layoutItem: {} });
+    engine.session.setSelection({ nodeIds: [], connectorIds: ['@branch:b'] });
+    const selected = host.sessions.get('connector-edit:selected') ?? [];
+    expect(selected.length).toBeGreaterThan(0);
+    expect(selected.some((p) => p.kind === 'circle' || p.kind === 'rect')).toBe(false);
+  });
+
+  it('处在已安装布局的布局树中 (根或成员) 时不显示「+」；布局未安装时照常显示', () => {
+    const { engine, store, host } = setup();
+    store.updateNode('a', { layout: { type: 'test:stack' } });
+    store.updateNode('b', { parentId: 'a', layoutItem: {} });
+    engine.session.setSelection({ nodeIds: ['a'] });
+    expect(host.sessions.has('connector-tool:plus')).toBe(true);
+
+    engine.use({
+      id: 'test/stack',
+      name: '堆叠',
+      version: '1.0.0',
+      install: (ctx) => ctx.registerLayout({ id: 'test:stack', label: '堆叠', arrange: () => new Map() })
+    });
+    engine.session.setSelection({ nodeIds: [] });
+    engine.session.setSelection({ nodeIds: ['a'] });
+    expect(host.sessions.has('connector-tool:plus')).toBe(false);
+    engine.session.setSelection({ nodeIds: ['b'] });
     expect(host.sessions.has('connector-tool:plus')).toBe(false);
   });
 });

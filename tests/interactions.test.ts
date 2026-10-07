@@ -473,6 +473,42 @@ describe('缩放控制柄', () => {
     expect(store.getNode('a')).toMatchObject({ x: 0, y: 0, width: 160, height: 100 });
   });
 
+  it('resize 为 width 的节点类型：只在左右边中点画竖条控制柄 (没有角)，拖右边与 Shift 都只改宽度；height 反之', () => {
+    const { engine, store, overlay } = setup();
+    /** 各控制柄图形的外接框 (中心与宽高) */
+    const handleBoxes = () =>
+      overlay.get('transform:handles')!.primitives.map((primitive) => {
+        const points = (primitive as { points: number[] }).points;
+        const xs = points.filter((_, i) => i % 2 === 0);
+        const ys = points.filter((_, i) => i % 2 === 1);
+        const [left, right, top, bottom] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+        return { x: (left + right) / 2, y: (top + bottom) / 2, tall: bottom - top > right - left };
+      });
+    engine.nodeTypes.register({ type: 'test:bar', label: '条', defaultData: {}, resize: 'width' });
+    store.updateNode('a', { nodeType: 'test:bar' });
+    click(engine, { x: 10, y: 10 });
+    expect(handleBoxes()).toEqual([
+      { x: 160, y: 50, tall: true },
+      { x: 0, y: 50, tall: true }
+    ]);
+    // 下边不是控制柄：按住下边拖动只是移动节点
+    drag(engine, { x: 80, y: 100 }, { x: 80, y: 160 });
+    expect(store.getNode('a')).toMatchObject({ y: 60, width: 160, height: 100 });
+    store.undo();
+    drag(engine, { x: 160, y: 100 }, { x: 200, y: 160 }, { shift: true });
+    expect(store.getNode('a')).toMatchObject({ x: 0, y: 0, width: 200, height: 100 });
+
+    engine.nodeTypes.register({ type: 'test:column', label: '柱', defaultData: {}, resize: 'height' });
+    store.updateNode('a', { nodeType: 'test:column' });
+    click(engine, { x: 10, y: 10 });
+    expect(handleBoxes().map(({ y, tall }) => ({ y, tall }))).toEqual([
+      { y: 0, tall: false },
+      { y: 100, tall: false }
+    ]);
+    drag(engine, { x: 100, y: 100 }, { x: 160, y: 140 });
+    expect(store.getNode('a')).toMatchObject({ x: 0, y: 0, width: 200, height: 140 });
+  });
+
   it('Shift 等比 (取变化更大的一轴)，Alt 以中心为基准', () => {
     const { engine, store } = setup();
     click(engine, { x: 10, y: 10 });

@@ -1,6 +1,7 @@
 /**
  * @file editing-shortcuts.ts
- * @description 编辑快捷键：删除、撤销重做、全选、取消选择、创建副本、锁定、层级调整、方向键微移、切换比例锁定
+ * @description 编辑快捷键：删除、撤销重做、全选、取消选择、创建副本、锁定、层级调整、方向键微移、切换比例锁定、
+ *              Enter / F2 编辑选中节点的文字
  *
  * 设计考量 (Why):
  * 1. 全部注册到焦点栈 (ADR-005)，只在画布持有焦点时生效；文本编辑等更高优先级作用域先行消费，
@@ -8,6 +9,8 @@
  * 2. 操作选区中的节点与连线，锁定的不参与删除、移动、复制与层级调整；锁定开关作用于全部选中节点 (否则无法解锁)。
  * 3. 锁定用 Ctrl+Shift+L：Ctrl+L 是浏览器聚焦地址栏的快捷键，常被浏览器或扩展抢先处理。
  * 4. Esc 清空选区后不消费按键，让更低优先级的兜底 (清除瞬态图元) 继续执行。
+ * 5. Enter / F2 只发出编辑意图 (session.requestTextEditing)，由文字编辑插件决定如何进入；
+ *    导图等更高优先级的作用域可先行把 Enter 用作别的操作 (插入同级主题)。
  */
 
 import {
@@ -79,6 +82,11 @@ export class EditingShortcutsPlugin implements SkyNotePlugin {
         },
         locked ? '锁定' : '解锁'
       );
+    } else if (!mod && !e.shiftKey && (e.key === 'Enter' || e.key === 'F2')) {
+      const [nodeId, ...rest] = session.selectedNodeIds;
+      const node = nodeId === undefined ? undefined : entities.getNode(nodeId)!.entity;
+      if (!node || rest.length > 0 || node.locked || !node.textBlocks?.length) return false;
+      session.requestTextEditing(node.id);
     } else if (e.key === 'Escape') {
       session.setSelection({ nodeIds: [], connectorIds: [] });
       return false;

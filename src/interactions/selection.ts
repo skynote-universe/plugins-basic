@@ -18,6 +18,8 @@
  *    拖动时选中连线的自由端与手动拐点随之平移，连在节点上的一端跟随节点。
  * 7. 拖动节点时吸附对齐 (边缘、中心线与等间距，见 snapping.ts)：每帧由「指针相对按下点的位移 + 吸附修正」
  *    算出总位移，再减去已移动的部分提交，吸附不会在逐帧增量里累积漂移；按住 Ctrl / ⌘ 临时关闭。
+ * 8. 拖到布局树 (如思维导图) 的节点上即加入该树 (ADR-130)：改挂并补上成员标记 layoutItem，位置交给布局排定；
+ *    只在对应布局已安装时生效 (未安装时不排版，加入也没有意义)。
  */
 
 import {
@@ -33,6 +35,7 @@ import {
   type SkyNotePlugin
 } from '@skynote/core';
 import { SNAP_THRESHOLD_PX, collectSnapTargets, drawSnapGuides, type SnapTargets } from './snapping';
+import { isInInstalledLayout } from '../layout/layout-membership';
 
 export const SELECTION_PLUGIN_ID = '@skynote/plugins-basic/selection';
 const MARQUEE_SESSION = 'selection:marquee';
@@ -272,7 +275,7 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
     const target = ctx.hitTestNode(
       point,
       (node) =>
-        !!ctx.nodeTypes.get(node.nodeType)?.acceptsChildren &&
+        (!!ctx.nodeTypes.get(node.nodeType)?.acceptsChildren || isInInstalledLayout(ctx, node.id)) &&
         !dragged.has(node.id) &&
         !ctx.entities.getAncestorIds(node.id).some((id) => dragged.has(id))
     );
@@ -314,7 +317,14 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
       return !parent || !!ctx.nodeTypes.get(parent.nodeType)?.acceptsChildren;
     });
     if (ids.length === 0) return;
-    ctx.document.reparentNodes(ids, targetId, { groupId, label: targetId ? '移入容器' : '移出容器' });
+    if (targetId === undefined || !isInInstalledLayout(ctx, targetId)) {
+      ctx.document.reparentNodes(ids, targetId, { groupId, label: targetId ? '移入容器' : '移出容器' });
+      return;
+    }
+    // 加入布局树：改挂并补上成员标记，与本次移动同组撤销
+    ctx.document.reparentNodes(ids, targetId, { groupId, label: '加入布局' });
+    const joining = ids.filter((id) => !ctx.document.getNode(id)?.layoutItem);
+    ctx.document.updateNodes(joining, { layoutItem: {} }, { groupId, label: '加入布局' });
   }
 
   private finish(pointerId: number): void {

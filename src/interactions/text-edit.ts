@@ -212,15 +212,20 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
   private caretVisible = true;
   private blinkTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly listeners = new Set<() => void>();
+  private releaseEditRequests: (() => void) | null = null;
 
   install(ctx: CanvasPluginContext): void {
     this.ctx = ctx;
     ctx.registerPointerHooks(this, TEXT_EDIT_PRIORITY);
+    // 其他插件 (如导图新建主题) 请求立即输入：进入该节点第一个文字块的编辑并全选，接着输入即替换
+    this.releaseEditRequests = ctx.session.onTextEditRequest((nodeId) => this.enterNodeSelectingAll(nodeId));
     ctx.onSessionChange((change) => this.onSessionChange(change));
     ctx.onDocumentChange((changes) => this.onDocumentChange(changes));
   }
 
   unmount(): void {
+    this.releaseEditRequests?.();
+    this.releaseEditRequests = null;
     // 卸载时只释放编辑态，不再修改文档
     const { state } = this;
     if (!state) return;
@@ -464,6 +469,19 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     return true;
   }
 
+  /** 按请求进入节点编辑：优先取框内的第一个文字块 (没有时取框外的，如画框标题) 并全选 */
+  private enterNodeSelectingAll(nodeId: string): void {
+    const node = this.ctx.document.getNode(nodeId);
+    if (!node || node.locked) return;
+    const blocks = this.textPrimitives(node);
+    const primitive = blocks.find((p) => p.x >= 0 && p.y >= 0) ?? blocks[0];
+    if (!primitive) return;
+    this.exit();
+    this.ctx.session.setSelection({ nodeIds: [node.id], connectorIds: [] });
+    const block = node.textBlocks!.find((b) => b.id === primitive.id)!;
+    this.start('node', node.id, primitive.id!, findTextSlot(block, this.ctx.nodeTypes.get(node.nodeType)), null);
+  }
+
   /**
    * 双击连线编辑线上的文字：双击在某段文字上时编辑它，双击在线上没有文字的地方时在该处新加一段；
    * 新建与随后的输入同组撤销，什么都没输入就退出时移除
@@ -494,7 +512,8 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     id: string,
     blockId: string,
     slot: NodeTextSlotDefinition | undefined,
-    point: Point,
+    /** 光标放在此处；null 时全选 */
+    point: Point | null,
     groupId = generateId('text-edit')
   ): void {
     const handler: TextInputHandler = {
@@ -532,10 +551,12 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     };
     this.state = state;
     const geometry = this.geometry(state);
-    if (geometry) {
+    if (geometry && point) {
       const hit = this.hit(geometry, point);
       state.anchor = state.focus = hit.offset;
       state.affinity = hit.affinity;
+    } else if (geometry) {
+      state.focus = getRunsText(geometry.runs).length;
     }
     this.refresh();
   }
@@ -632,6 +653,11 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     if (!state || !geometry) return false;
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    // 单行文字 (如导图主题、画框标题) 与表单输入框一致：Tab 确认并退出编辑，按键继续下传 (导图据此插入子主题)
+    if (key === 'Tab' && state.slot?.singleLine) {
+      this.exit();
+      return false;
+    }
     if (this.handleKey(state, geometry, key, mod, e.shiftKey)) e.preventDefault();
     // 其余按键 (字符、复制粘贴) 保留默认行为交给输入通道，但不再下传给画布快捷键
     return true;

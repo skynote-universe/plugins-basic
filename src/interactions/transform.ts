@@ -35,6 +35,7 @@ import {
   type Point,
   type PointerHooks,
   type RectBounds,
+  type NodeResizeAxes,
   type ResizeHandle,
   type AngledCursor,
   type SessionChange,
@@ -48,6 +49,9 @@ const HANDLES_SESSION = 'transform:handles';
 const TRANSFORM_PRIORITY = 50;
 /** 控制柄的屏幕边长 */
 const HANDLE_SIZE_PX = 8;
+/** 只能调一轴时边中点条形控制柄的屏幕尺寸 (长边沿着所在的边) */
+const BAR_LENGTH_PX = 16;
+const BAR_THICKNESS_PX = 5;
 /** 控制柄与边的屏幕拾取容差 */
 const HANDLE_HIT_PX = 6;
 /** 角外旋转热区的屏幕半径 */
@@ -78,6 +82,8 @@ interface SelectionFrame {
   readonly lockAspect: boolean;
   /** 拖角时等比缩放内容 (单选且节点类型声明时) */
   readonly scaleContentOnCorners: boolean;
+  /** 可调整的尺寸方向：只能调一轴时不出现另一轴的边控制柄，拖角只改可调的一轴 (单选且节点类型声明时) */
+  readonly resize: NodeResizeAxes;
   /** 参与变换的节点 (最顶层、未锁定)，及其开始时的快照与世界外框 */
   readonly targets: readonly { node: NodeEntity; frame: WorldFrame }[];
 }
@@ -236,6 +242,7 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
         frame,
         lockAspect: isAspectLocked(node, definition),
         scaleContentOnCorners: definition?.scaleContentOnCorners ?? false,
+        resize: definition?.resize ?? 'both',
         targets
       };
     }
@@ -260,6 +267,7 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
       },
       lockAspect,
       scaleContentOnCorners: false,
+      resize: 'both',
       targets
     };
   }
@@ -270,8 +278,13 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     return { x: ((sign.x + 1) / 2) * frame.width, y: ((sign.y + 1) / 2) * frame.height };
   }
 
-  /** 屏幕上过窄的外框只保留角控制柄，避免边控制柄与角重叠而无法拖动 */
-  private visibleHandles(selection: SelectionFrame): ResizeHandle[] {
+  /**
+   * 只能调一轴时只有该轴的两条边 (没有角，角会暗示宽高都能调)；
+   * 否则屏幕上过窄的外框只保留角控制柄，避免边控制柄与角重叠而无法拖动
+   */
+  private visibleHandles(selection: SelectionFrame): readonly ResizeHandle[] {
+    if (selection.resize === 'width') return ['e', 'w'];
+    if (selection.resize === 'height') return ['n', 's'];
     const zoom = this.ctx.session.viewport.zoom;
     const narrow = selection.frame.width * zoom < HANDLE_SIZE_PX * 3;
     const short = selection.frame.height * zoom < HANDLE_SIZE_PX * 3;
@@ -352,10 +365,13 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     const factor = fromCenter ? 2 : 1;
 
     // 2. [缩放比例与尺寸夹取] 依据等比锁定与 Shift 修饰键换算目标宽高与缩放倍数
-    let width = sign.x === 0 ? frame.width : frame.width + sign.x * (p.x - p0.x) * factor;
-    let height = sign.y === 0 ? frame.height : frame.height + sign.y * (p.y - p0.y) * factor;
+    // 只能调一轴的节点 (另一轴由内容决定)：拖角与等比修饰键都只改可调的一轴
+    const { resize } = selection;
+    let width = sign.x === 0 || resize === 'height' ? frame.width : frame.width + sign.x * (p.x - p0.x) * factor;
+    let height = sign.y === 0 || resize === 'width' ? frame.height : frame.height + sign.y * (p.y - p0.y) * factor;
     const isCorner = sign.x !== 0 && sign.y !== 0;
-    const uniform = selection.lockAspect || e.modifiers.shift || (isCorner && selection.scaleContentOnCorners);
+    const uniform =
+      resize === 'both' && (selection.lockAspect || e.modifiers.shift || (isCorner && selection.scaleContentOnCorners));
     let scale = 1;
     if (uniform) {
       // 取变化更大的一轴决定整体倍数；边控制柄只看被拖动的那一轴
@@ -469,7 +485,10 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     }
   }
 
-  /** 多选时画整体外框；角控制柄为随外框旋转的小方块 (屏幕尺寸固定) */
+  /**
+   * 多选时画整体外框；角控制柄为随外框旋转的小方块 (屏幕尺寸固定)。
+   * 只能调一轴时改为在该轴两条边的中点画条形控制柄，一眼看出只能沿这一轴拉伸
+   */
   private redraw(): void {
     const { session, host } = this.ctx;
     const { selection } = this;
@@ -496,13 +515,25 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
         strokeJoin: 'miter'
       });
     }
-    for (const handle of CORNERS) {
-      const p = this.handlePosition(selection.frame, handle);
+    const { frame } = selection;
+    // 条形控制柄不超过所在边长度的一半 (缩小视图时外框很矮也不会溢出)
+    const along = (side: number) => Math.min(BAR_LENGTH_PX / 2 / viewport.zoom, side / 4);
+    const across = BAR_THICKNESS_PX / 2 / viewport.zoom;
+    const handles =
+      selection.resize === 'both'
+        ? CORNERS.map((handle) => ({ handle, hx: half, hy: half }))
+        : this.visibleHandles(selection).map((handle) =>
+            HANDLE_SIGNS[handle].x === 0
+              ? { handle, hx: along(frame.width), hy: across }
+              : { handle, hx: across, hy: along(frame.height) }
+          );
+    for (const { handle, hx, hy } of handles) {
+      const p = this.handlePosition(frame, handle);
       const square = [
-        applyMatrix(toWorld, p.x - half, p.y - half),
-        applyMatrix(toWorld, p.x + half, p.y - half),
-        applyMatrix(toWorld, p.x + half, p.y + half),
-        applyMatrix(toWorld, p.x - half, p.y + half)
+        applyMatrix(toWorld, p.x - hx, p.y - hy),
+        applyMatrix(toWorld, p.x + hx, p.y - hy),
+        applyMatrix(toWorld, p.x + hx, p.y + hy),
+        applyMatrix(toWorld, p.x - hx, p.y + hy)
       ];
       primitives.push({
         kind: 'polygon',

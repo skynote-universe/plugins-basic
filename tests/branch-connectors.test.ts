@@ -1,0 +1,195 @@
+/**
+ * @file branch-connectors.test.ts
+ * @description ADR-130 布局树分支线：派生规则、三层生效值与继承、写入转写与改挂、成员关系变化、
+ *              复制、读取校验、未安装布局时的降级与布局晚到时的刷新
+ */
+
+import { describe, it, expect } from 'vitest';
+import {
+  SkyNoteEngine,
+  createEmptyCanvasDocument,
+  type DocumentChangeSet,
+  type LayoutDefinition,
+  type LayoutMember,
+  type NodeEntity,
+  type Point,
+  type SkyNotePlugin
+} from '@skynote/core';
+import { BranchConnectorsPlugin, readBranchOverride } from '../src/layout/branch-connectors';
+
+function makeNode(id: string, patch: Partial<NodeEntity> = {}): NodeEntity {
+  return {
+    id,
+    type: 'node',
+    nodeType: 'rect',
+    x: 0,
+    y: 0,
+    width: 100,
+    height: 40,
+    rotation: 0,
+    zIndex: 'a0',
+    locked: false,
+    ...patch
+  };
+}
+
+/** 大纲式排版 (测试用)：深度缩进、逐行向下 */
+const outline: LayoutDefinition = {
+  id: 'test:outline',
+  label: '大纲',
+  arrange(tree) {
+    const positions = new Map<string, Point>();
+    let y = 0;
+    const visit = (member: LayoutMember): void => {
+      if (member.depth > 0) positions.set(member.node.id, { x: member.depth * 40, y });
+      y += member.node.height + 10;
+      member.children.forEach(visit);
+    };
+    visit(tree.root);
+    return positions;
+  },
+  branch: () => ({
+    router: 'orthogonal',
+    fromAnchor: { x: 0, y: 1 },
+    toAnchor: { x: 0, y: 0.5 },
+    style: { stroke: 'gray' }
+  })
+};
+
+const outlinePlugin: SkyNotePlugin = {
+  id: 'test/outline',
+  name: '大纲',
+  version: '1.0.0',
+  install: (ctx) => ctx.registerLayout(outline)
+};
+
+/** 根 root 下：a (含子 a1)、b */
+function setup(withLayout = true) {
+  const engine = new SkyNoteEngine().use(new BranchConnectorsPlugin());
+  if (withLayout) engine.use(outlinePlugin);
+  const store = engine.documentStore;
+  store.batch(() => {
+    store.addNode(makeNode('root', { layout: { type: 'test:outline' } }));
+    store.addNode(makeNode('a', { parentId: 'root', zIndex: 'a0', layoutItem: {} }));
+    store.addNode(makeNode('a1', { parentId: 'a', zIndex: 'a0', layoutItem: {} }));
+    store.addNode(makeNode('b', { parentId: 'root', zIndex: 'a1', layoutItem: {} }));
+  });
+  const branch = (id: string) => engine.entityStore.getConnector(`@branch:${id}`)?.entity;
+  return { engine, store, branch };
+}
+
+describe('分支线来源', () => {
+  it('每个非根成员一条：父成员连向自己，规格取布局默认；参与路由，但不在文档中', () => {
+    const { engine, store, branch } = setup();
+    expect(branch('a1')).toMatchObject({
+      connectorType: 'orthogonal',
+      from: { nodeId: 'a', anchor: { x: 0, y: 1 } },
+      to: { nodeId: 'a1', anchor: { x: 0, y: 0.5 } },
+      style: { stroke: 'gray' }
+    });
+    expect(branch('root')).toBeUndefined();
+    expect([...engine.entityStore.getConnectorIdsOfNode('a')].sort()).toEqual(['@branch:a', '@branch:a1']);
+    expect(engine.getConnectorRoute('@branch:a1')!.points.length).toBeGreaterThanOrEqual(2);
+    expect(store.getView().content.connectors).toEqual({});
+  });
+
+  it('生效值三层叠加：颜色、粗细、虚实、线型沿子树继承 (近者优先)，箭头与连接点只作用于本条', () => {
+    const { store, branch } = setup();
+    store.updateNode('a', {
+      layoutItem: {
+        branch: { style: { stroke: 'red', endArrow: 'arrow' }, router: 'curved', toAnchor: { x: 1, y: 1 } }
+      }
+    });
+    expect(branch('a')).toMatchObject({ connectorType: 'curved', style: { stroke: 'red', endArrow: 'arrow' } });
+    const child = branch('a1')!;
+    expect(child).toMatchObject({
+      connectorType: 'curved',
+      style: { stroke: 'red' },
+      to: { anchor: { x: 0, y: 0.5 } }
+    });
+    expect(child.style!.endArrow).toBeUndefined();
+
+    store.updateNode('a1', { layoutItem: { branch: { style: { stroke: 'blue' } } } });
+    expect(branch('a1')!.style!.stroke).toBe('blue');
+  });
+
+  it('对分支线的修改转写到成员 (与普通连线同样的合并语义)，一步撤销；没有实际变化不产生撤销；不能单独删除', () => {
+    const { store, branch } = setup();
+    const changes: DocumentChangeSet[] = [];
+    store.subscribe((_view, _record, change) => changes.push(change));
+
+    store.updateConnectors(['@branch:a1'], { style: { endArrow: 'arrow', strokeWidth: 3 } });
+    // 端点等几何字段归布局，随同写入也被忽略
+    store.updateConnector('@branch:a1', { connectorType: 'straight', to: { nodeId: 'a1', anchor: { x: 1, y: 0 } } });
+    expect(store.getNode('a1')!.layoutItem!.branch).toEqual({
+      style: { endArrow: 'arrow', strokeWidth: 3 },
+      router: 'straight'
+    });
+    expect(branch('a1')!.to.anchor).toEqual({ x: 0, y: 0.5 });
+    expect(branch('a1')).toMatchObject({ connectorType: 'straight', style: { endArrow: 'arrow', strokeWidth: 3 } });
+    expect(changes.at(-1)!.connectors.geometry.has('@branch:a1')).toBe(true);
+
+    expect(store.updateConnector('@branch:a1', { style: { strokeWidth: 3 } })).toBeNull();
+    store.updateConnector('@branch:a1', { style: { endArrow: undefined } });
+    expect(store.getNode('a1')!.layoutItem!.branch).toMatchObject({ style: { strokeWidth: 3 } });
+    store.undo();
+    store.undo();
+    expect(store.getNode('a1')!.layoutItem!.branch).toEqual({ style: { endArrow: 'arrow', strokeWidth: 3 } });
+
+    expect(store.removeEntities({ connectorIds: ['@branch:a1'] })).toBeNull();
+    expect(branch('a1')).toBeDefined();
+  });
+
+  it('分支线的端点不能改接 (写入被忽略)；去掉 layoutItem 或删除成员时分支线随之消失', () => {
+    const { store, branch } = setup();
+    expect(store.updateConnector('@branch:a1', { from: { nodeId: 'b' } })).toBeNull();
+    expect(store.getNode('a1')!.parentId).toBe('a');
+    expect(branch('a1')!.from.nodeId).toBe('a');
+
+    store.updateNode('a1', { layoutItem: undefined });
+    expect(branch('a1')).toBeUndefined();
+    store.removeEntities({ nodeIds: ['a'] });
+    expect(branch('a')).toBeUndefined();
+    store.undo();
+    expect(branch('a')).toBeDefined();
+  });
+
+  it('复制成员子树带上 layoutItem，不复制分支线；同容器创建副本即成为新成员并有自己的分支线', () => {
+    const { store, branch } = setup();
+    const payload = store.copyEntities({ nodeIds: ['a'], connectorIds: ['@branch:a1'] })!;
+    expect(payload.connectors).toEqual([]);
+    expect(payload.nodes.find((n) => n.id === 'a1')!.layoutItem).toEqual({});
+
+    const { nodeIds } = store.duplicateEntities({ nodeIds: ['b'] }, { x: 0, y: 0 });
+    expect(branch(nodeIds[0])!.from.nodeId).toBe('root');
+  });
+
+  it('读取校验：非法的设置项忽略，合法项照常生效', () => {
+    expect(
+      readBranchOverride({
+        branch: {
+          style: 'red',
+          router: '',
+          toAnchor: { x: 'left' },
+          fromAnchor: { x: 1, y: 0 },
+          textBlocks: [{ id: 't', runs: 'x', position: 0.5 }]
+        }
+      })
+    ).toEqual({ fromAnchor: { x: 1, y: 0 }, textBlocks: [] });
+    expect(readBranchOverride({ branch: [] })).toBeUndefined();
+  });
+
+  it('未安装布局时按浮动端直线绘制 (降级可读)；布局晚到时刷新为布局的规格，卸载后回落', () => {
+    const doc = createEmptyCanvasDocument();
+    doc.content.nodes.root = makeNode('root', { layout: { type: 'test:outline' } });
+    doc.content.nodes.a = makeNode('a', { parentId: 'root', layoutItem: {} });
+    const engine = new SkyNoteEngine({ initialDoc: doc }).use(new BranchConnectorsPlugin());
+    const branch = () => engine.entityStore.getConnector('@branch:a')!.entity;
+    expect(branch()).toMatchObject({ connectorType: 'straight', from: { nodeId: 'root' }, to: { nodeId: 'a' } });
+
+    engine.use(outlinePlugin);
+    expect(branch()).toMatchObject({ connectorType: 'orthogonal', style: { stroke: 'gray' } });
+    engine.plugins.remove('test/outline');
+    expect(branch().connectorType).toBe('straight');
+  });
+});
