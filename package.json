@@ -3,7 +3,22 @@
   "version": "0.1.0",
   "type": "module",
   "description": "SkyNote official basic nodes (sticky, text, shapes) and interactions",
-  "license": "Apache-2.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/skynote-universe/plugins-basic.git"
+  },
+  "homepage": "https://github.com/skynote-universe/plugins-basic#readme",
+  "bugs": {
+    "url": "https://github.com/skynote-universe/plugins-basic/issues"
+  },
+  "keywords": [
+    "whiteboard",
+    "infinite-canvas",
+    "sticky-note",
+    "shapes",
+    "connectors"
+  ],
   "sideEffects": false,
   "main": "./src/index.ts",
   "types": "./src/index.ts",
@@ -29,7 +44,12 @@
       "import": "./src/interactions/index.ts"
     }
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
+    "build": "tsdown",
+    "prepack": "tsdown",
     "test": "vitest run --dir tests",
     "typecheck": "tsc --noEmit",
     "lint": "eslint ."
@@ -38,6 +58,30 @@
     "@skynote/core": "workspace:*"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js"
+      },
+      "./sticky": {
+        "types": "./dist/sticky.d.ts",
+        "import": "./dist/sticky.js"
+      },
+      "./free-text": {
+        "types": "./dist/free-text.d.ts",
+        "import": "./dist/free-text.js"
+      },
+      "./shapes": {
+        "types": "./dist/shapes.d.ts",
+        "import": "./dist/shapes.js"
+      },
+      "./interactions": {
+        "types": "./dist/interactions.d.ts",
+        "import": "./dist/interactions.js"
+      }
+    }
   }
 }
