@@ -39,6 +39,7 @@ const LABEL_SLOT = 'label';
 interface ShapePaint {
   fill: string;
   stroke: string;
+  strokeOpacity?: number;
   strokeWidth?: number;
   strokeDashArray?: number[];
   strokeCap?: NodeStyle['strokeCap'];
@@ -205,6 +206,7 @@ export class ShapeNodeType implements NodeTypeDefinition {
     const paint: ShapePaint = {
       fill: typeof style.fill === 'string' ? style.fill : theme.nodeFill,
       stroke: style.stroke ?? theme.nodeStroke,
+      strokeOpacity: style.strokeOpacity,
       strokeWidth: style.strokeWidth,
       strokeDashArray: style.strokeDashArray,
       strokeCap: style.strokeCap,

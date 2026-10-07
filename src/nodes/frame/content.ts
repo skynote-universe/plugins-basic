@@ -108,6 +108,7 @@ export class FrameNodeType implements NodeTypeDefinition {
         fill: typeof style.fill === 'string' ? style.fill : theme.nodeFill,
         fillOpacity: style.fillOpacity,
         stroke: style.stroke ?? theme.nodeStroke,
+        strokeOpacity: style.strokeOpacity,
         strokeWidth: style.strokeWidth,
         strokeDashArray: style.strokeDashArray,
         radius: style.radius
