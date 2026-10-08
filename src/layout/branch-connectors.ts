@@ -5,20 +5,27 @@
  * 设计考量 (Why):
  * 1. 单一事实源：文档里没有分支连线实体，线由成员关系推导；删除、改挂、复制、撤销、协同都无需同步。
  * 2. 设置与普通连线一致：本条设置的各项类型都复用连线 (样式、线型、连接点、线上文字)，呈现走普通连线的整套管线。
- * 3. 生效值三层叠加：布局的 branch() 默认 < 祖先分支的可继承项 (颜色、粗细、虚实、线型，近者优先) < 本条设置；
- *    箭头、连接点与线上文字只作用于本条。后加入的子成员自动沿用祖先的设置。
- * 4. layoutItem 的各键是不可信输入 (内核只保证是纯数据)：这里逐项校验，非法项忽略，不写回文档。
- * 5. 没有安装对应布局 (如商业导图插件) 时按浮动端直线绘制：内容完整可读，只是不能自动排版。
+ * 3. 设置分两份：整枝设置 (branchStyle / branchRouter，颜色、粗细、虚实与线型) 作用于本条并沿子树继承，
+ *    单线设置 (style / router) 只作用于本条。生效值：布局的 edge() 默认 < 祖先的整枝设置 (近者优先)
+ *    < 本条整枝设置 < 本条单线设置；箭头、连接点与线上文字只作用于本条。后加入的子成员自动沿用祖先的整枝设置。
+ * 4. 两份设置由两种操作写入：直接修改分支线 (选中连线时的工具栏) 只改这一条，写进单线设置；
+ *    选中成员时经 setBranchStyle 修改整个分支，写进整枝设置。写进文档的都是普通补丁，撤销与协同不受影响。
+ * 5. layoutItem 的各键是不可信输入 (内核只保证是纯数据)：这里逐项校验，非法项忽略，不写回文档。
+ * 6. 分支线在布局根的坐标系中布线 (routeFrame)：布局按根的局部坐标排列成员，线也在同一坐标系中出线，
+ *    根旋转或放进旋转的容器时线与主题一起旋转。
+ * 7. 没有安装对应布局 (如商业导图插件) 时按浮动端直线绘制：内容完整可读，只是不能自动排版。
  */
 
 import {
   areStructuredValuesEqual,
   buildLayoutTree,
+  derivedConnectorId,
   findMemberRootId,
   sanitizeRichTextRuns,
   sortSiblingsByLayer,
-  type BranchSpec,
+  type LayoutEdgeSpec,
   type CanvasPatch,
+  type CommandOptions,
   type CanvasPluginContext,
   type ConnectorEntity,
   type ConnectorStyle,
@@ -33,11 +40,16 @@ import {
   type SkyNotePlugin
 } from '@skynote/core';
 
-/** 分支线的本条设置 (存于成员的 layoutItem.branch)，各项类型与普通连线一致 */
+/** 分支线设置 (存于成员的 layoutItem.branch)，各项类型与普通连线一致 */
 export interface BranchOverride {
+  /** 只作用于本条线的样式 (优先于整枝设置) */
   style?: ConnectorStyle;
-  /** 路由器 id (线型) */
+  /** 只作用于本条线的路由器 id (线型) */
   router?: string;
+  /** 整个分支：本条线与子树中的分支线沿用的可继承样式 (颜色、粗细、虚实) */
+  branchStyle?: ConnectorStyle;
+  /** 整个分支沿用的路由器 id */
+  branchRouter?: string;
   /** 父成员一端的连接点 (按宽高归一化) */
   fromAnchor?: Point;
   /** 本成员一端的连接点 (按宽高归一化) */
@@ -46,13 +58,23 @@ export interface BranchOverride {
 }
 
 export const BRANCH_SOURCE_ID = 'branch';
+export const BRANCH_CONNECTORS_PLUGIN_ID = '@skynote/plugins-basic/branch-connectors';
+
+/** 分支线对应的成员 id (线由父成员连向它)；不是分支线时为 undefined */
+export function branchMemberOf(connectorId: string): string | undefined {
+  const prefix = derivedConnectorId(BRANCH_SOURCE_ID, '');
+  return connectorId.startsWith(prefix) ? connectorId.slice(prefix.length) : undefined;
+}
+
+/** 修改分支线样式的作用范围：整个分支 (可继承项沿子树生效) 或仅此线 */
+export type BranchWriteScope = 'branch' | 'line';
 
 /** 这些字段变化会改变成员关系或分支设置 (沿子树继承)，需要重算该节点及其后代 */
 const BRANCH_FIELDS: ReadonlySet<string> = new Set(['layout', 'layoutItem', 'parentId', 'zIndex']);
 /** 沿子树向下继承的样式项 */
 const INHERITED_STYLE_KEYS = ['stroke', 'strokeWidth', 'strokeDashArray'] as const;
 /** 布局未注册或未给出规格时：浮动端直线 */
-const FALLBACK_BRANCH: BranchSpec = { router: 'straight' };
+const FALLBACK_BRANCH: LayoutEdgeSpec = { router: 'straight' };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -74,7 +96,7 @@ function sanitizeTextBlock(value: unknown): ConnectorTextBlock | null {
   };
 }
 
-/** 读取成员的本条设置：逐项校验，非法项忽略 */
+/** 读取成员的分支线设置：逐项校验，非法项忽略 */
 export function readBranchOverride(item: Readonly<Record<string, unknown>>): BranchOverride | undefined {
   const raw = item.branch;
   if (!isRecord(raw)) return undefined;
@@ -84,14 +106,21 @@ export function readBranchOverride(item: Readonly<Record<string, unknown>>): Bra
   return {
     ...(isRecord(raw.style) && { style: raw.style as ConnectorStyle }),
     ...(typeof raw.router === 'string' && raw.router.length > 0 && { router: raw.router }),
+    ...(isRecord(raw.branchStyle) && { branchStyle: pickInherited(raw.branchStyle as ConnectorStyle) }),
+    ...(typeof raw.branchRouter === 'string' && raw.branchRouter.length > 0 && { branchRouter: raw.branchRouter }),
     ...(isPoint(raw.fromAnchor) && { fromAnchor: raw.fromAnchor }),
     ...(isPoint(raw.toAnchor) && { toAnchor: raw.toAnchor }),
     ...(textBlocks && { textBlocks })
   };
 }
 
-/** 成员通向父成员的分支线 (三层叠加后的生效值) */
-export function deriveBranchConnector(member: LayoutMember, spec: BranchSpec | undefined): DerivedConnector {
+/** 只保留可继承的样式项 */
+function pickInherited(style: ConnectorStyle): ConnectorStyle {
+  return Object.fromEntries(INHERITED_STYLE_KEYS.filter((key) => key in style).map((key) => [key, style[key]]));
+}
+
+/** 成员通向父成员的分支线 (布局默认 < 祖先整枝 < 本条整枝 < 本条单线) */
+export function deriveBranchConnector(member: LayoutMember, spec: LayoutEdgeSpec | undefined): DerivedConnector {
   const parent = member.parent!;
   const base = spec ?? FALLBACK_BRANCH;
   const inherited: Record<string, unknown> = {};
@@ -99,21 +128,25 @@ export function deriveBranchConnector(member: LayoutMember, spec: BranchSpec | u
   for (let ancestor: LayoutMember | undefined = parent; ancestor?.parent; ancestor = ancestor.parent) {
     const branch = readBranchOverride(ancestor.item);
     if (!branch) continue;
-    inheritedRouter ??= branch.router;
+    inheritedRouter ??= branch.branchRouter;
     for (const key of INHERITED_STYLE_KEYS) {
-      if (!(key in inherited) && branch.style?.[key] !== undefined) inherited[key] = branch.style[key];
+      if (!(key in inherited) && branch.branchStyle?.[key] !== undefined) inherited[key] = branch.branchStyle[key];
     }
   }
   const own = readBranchOverride(member.item);
+  let root = parent;
+  while (root.parent) root = root.parent;
   const fromAnchor = own?.fromAnchor ?? base.fromAnchor;
   const toAnchor = own?.toAnchor ?? base.toAnchor;
   return {
-    connectorType: own?.router ?? inheritedRouter ?? base.router,
+    connectorType: own?.router ?? own?.branchRouter ?? inheritedRouter ?? base.router,
     from: fromAnchor ? { nodeId: parent.node.id, anchor: fromAnchor } : { nodeId: parent.node.id },
     to: toAnchor ? { nodeId: member.node.id, anchor: toAnchor } : { nodeId: member.node.id },
     zIndex: member.node.zIndex,
     locked: false,
-    style: { ...base.style, ...(inherited as ConnectorStyle), ...own?.style },
+    // 在布局根的坐标系中布线：整张图旋转或放进旋转的容器时，线随之旋转
+    routeFrame: root.node.id,
+    style: { ...base.style, ...(inherited as ConnectorStyle), ...own?.branchStyle, ...own?.style },
     ...(own?.textBlocks && { textBlocks: own.textBlocks })
   };
 }
@@ -124,23 +157,46 @@ function withoutUndefined<T extends object>(value: T): T {
 }
 
 /**
- * 把对分支线的修改 (与普通连线同样的字段与合并语义) 映射为本条设置：样式、线型 (router) 与线上文字
- * 端点、拐点、锁定与层级等几何与结构字段归布局，忽略 (界面也不提供分支线的端点与拐点拖拽)
- * @returns 新的本条设置；undefined 表示清空
+ * 把对分支线的修改 (与普通连线同样的字段与合并语义) 映射为分支线设置：样式、线型 (router) 与线上文字
+ * 整个分支：可继承项与线型写进整枝设置，并去掉单线设置中的同名项 (让新值在本条生效)，其余样式项 (箭头等) 只作用于本条；
+ * 仅此线：全部写进单线设置。端点、拐点、锁定与层级等几何与结构字段归布局，忽略
+ * @returns 新的分支线设置；undefined 表示清空
  */
 export function mapBranchWrite(
   current: BranchOverride | undefined,
   partial: Partial<ConnectorEntity>,
-  merge: boolean
+  merge: boolean,
+  scope: BranchWriteScope
 ): BranchOverride | undefined {
   const next: BranchOverride = { ...current };
-  if ('style' in partial) {
-    next.style = partial.style && withoutUndefined(merge ? { ...current?.style, ...partial.style } : partial.style);
+  if ('style' in partial && partial.style === undefined) {
+    // 清空样式：仅此线只清单线设置，整个分支连整枝设置一并清除
+    delete next.style;
+    if (scope === 'branch') delete next.branchStyle;
+  } else if ('style' in partial) {
+    const requested = partial.style!;
+    const shared = scope === 'branch' ? pickInherited(requested) : {};
+    const lineOnly = Object.fromEntries(Object.entries(requested).filter(([key]) => !(key in shared)));
+    const kept = Object.fromEntries(
+      Object.entries((merge && current?.style) || {}).filter(([key]) => !(key in shared))
+    );
+    next.style = withoutUndefined({ ...kept, ...lineOnly });
+    if (scope === 'branch') {
+      next.branchStyle = withoutUndefined(merge ? { ...current?.branchStyle, ...shared } : shared);
+    }
   }
-  if ('connectorType' in partial) next.router = partial.connectorType;
+  if ('connectorType' in partial) {
+    if (scope === 'branch') {
+      next.branchRouter = partial.connectorType;
+      delete next.router;
+    } else {
+      next.router = partial.connectorType;
+    }
+  }
   if ('textBlocks' in partial) next.textBlocks = partial.textBlocks;
   const branch = withoutUndefined(next);
   if (branch.style && Object.keys(branch.style).length === 0) delete branch.style;
+  if (branch.branchStyle && Object.keys(branch.branchStyle).length === 0) delete branch.branchStyle;
   return Object.keys(branch).length > 0 ? branch : undefined;
 }
 
@@ -172,7 +228,7 @@ class BranchConnectorSource implements DerivedConnectorSource {
         continue;
       }
       const tree = trees.get(findMemberRootId(id, this.getNode)!)!;
-      const spec = this.ctx.layouts.get(tree.root.node.layout!.type)?.branch?.(member, tree);
+      const spec = this.ctx.layouts.get(tree.root.node.layout!.type)?.edge?.(member, tree);
       result.set(id, deriveBranchConnector(member, spec));
     }
     return result;
@@ -187,7 +243,8 @@ class BranchConnectorSource implements DerivedConnectorSource {
     const node = this.getNode(key);
     if (!node?.layoutItem) return [];
     const previous = readBranchOverride(node.layoutItem);
-    const branch = mapBranchWrite(previous, partial, merge);
+    // 直接修改分支线只作用于这一条；整个分支经 BranchConnectorsPlugin.setBranchStyle 修改
+    const branch = mapBranchWrite(previous, partial, merge, 'line');
     // 没有实际变化时不写补丁，避免多出一步空的撤销
     if (areStructuredValuesEqual(branch, previous)) return [];
     const path = ['content', 'nodes', key, 'layoutItem', 'branch'];
@@ -215,12 +272,101 @@ class BranchConnectorSource implements DerivedConnectorSource {
 
 /** 分支线插件：注册分支线来源，布局注册表变化 (如导图插件晚到或卸载) 时全量刷新 */
 export class BranchConnectorsPlugin implements SkyNotePlugin {
-  readonly id = '@skynote/plugins-basic/branch-connectors';
+  readonly id = BRANCH_CONNECTORS_PLUGIN_ID;
   readonly name = '布局分支线';
   readonly version = '0.1.0';
+  private ctx!: CanvasPluginContext;
 
   install(ctx: CanvasPluginContext): void {
+    this.ctx = ctx;
     ctx.registerConnectorSource(new BranchConnectorSource(ctx));
     ctx.layouts.onChange(() => ctx.refreshConnectorSource(BRANCH_SOURCE_ID));
+  }
+
+  /**
+   * 修改整个分支的样式 (界面选中成员时用)：颜色、粗细、虚实与线型写进成员的整枝设置，作用于它通向父成员的线
+   * 并沿子树继承；同时去掉这条线上的同名单线设置，让新值生效 (子树中单独设置过的线保留)。一步撤销
+   * @param patch 显式传 undefined 的项表示清除
+   */
+  setBranchStyle(
+    memberIds: Iterable<string>,
+    patch: ConnectorStyle & { router?: string },
+    options?: CommandOptions
+  ): void {
+    const { router, ...style } = patch;
+    const partial: Partial<ConnectorEntity> = { style, ...('router' in patch && { connectorType: router }) };
+    this.updateBranches(memberIds, (previous) => mapBranchWrite(previous, partial, true, 'branch'), {
+      label: '设置分支样式',
+      ...options
+    });
+  }
+
+  /**
+   * 清除分支线的样式设置，回到布局默认 (如导图主题的线色)：keys 缺省时清除整枝与单线的全部样式和线型，
+   * 给出时只清除这些样式项 (如切换导图主题时只清颜色与粗细)；线上文字与连接点保留。一步撤销
+   */
+  clearBranchStyle(
+    memberIds: Iterable<string>,
+    keys?: readonly (keyof ConnectorStyle)[],
+    options?: CommandOptions
+  ): void {
+    const strip = (style: ConnectorStyle | undefined): ConnectorStyle | undefined => {
+      if (!style || !keys) return undefined;
+      const rest = Object.fromEntries(
+        Object.entries(style).filter(([key]) => !keys.includes(key as keyof ConnectorStyle))
+      );
+      return Object.keys(rest).length > 0 ? rest : undefined;
+    };
+    this.updateBranches(
+      memberIds,
+      (previous) => {
+        if (!previous) return undefined;
+        const { style, branchStyle, router, branchRouter, ...kept } = previous;
+        return withoutUndefined({
+          ...kept,
+          style: strip(style),
+          branchStyle: strip(branchStyle),
+          ...(keys && { router, branchRouter })
+        });
+      },
+      { label: '清除分支样式', ...options }
+    );
+  }
+
+  /**
+   * 清除这些线单独的设置 (单线样式与线型)，回到所在分支与布局的样式 (界面选中分支线时的「恢复默认」)；
+   * 整枝设置 (影响下级分支)、线上文字与连接点保留。一步撤销
+   */
+  clearLineStyle(memberIds: Iterable<string>, options?: CommandOptions): void {
+    this.updateBranches(
+      memberIds,
+      (previous) => {
+        if (!previous) return undefined;
+        const { style: _style, router: _router, ...kept } = previous;
+        return kept;
+      },
+      { label: '恢复默认样式', ...options }
+    );
+  }
+
+  /** 按 next 改写各成员的分支线设置 (空设置即去掉)；没有实际变化的成员不产生补丁 */
+  private updateBranches(
+    memberIds: Iterable<string>,
+    next: (previous: BranchOverride | undefined) => BranchOverride | undefined,
+    options: CommandOptions
+  ): void {
+    this.ctx.document.updateNodes(
+      memberIds,
+      (node) => {
+        if (!node.layoutItem) return {};
+        const previous = readBranchOverride(node.layoutItem);
+        const result = next(previous);
+        const branch = result && Object.keys(result).length > 0 ? result : undefined;
+        if (areStructuredValuesEqual(branch, previous)) return {};
+        const { branch: _previous, ...item } = node.layoutItem;
+        return { layoutItem: branch ? { ...item, branch } : item };
+      },
+      options
+    );
   }
 }

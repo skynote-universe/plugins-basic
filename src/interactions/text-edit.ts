@@ -653,7 +653,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     if (!state || !geometry) return false;
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-    // 单行文字 (如导图主题、画框标题) 与表单输入框一致：Tab 确认并退出编辑，按键继续下传 (导图据此插入子主题)
+    // 单行文字 (如画框标题) 与表单输入框一致：Tab 确认并退出编辑，按键继续下传给更低优先级的作用域
     if (key === 'Tab' && state.slot?.singleLine) {
       this.exit();
       return false;

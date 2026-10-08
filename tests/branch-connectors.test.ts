@@ -15,7 +15,12 @@ import {
   type Point,
   type SkyNotePlugin
 } from '@skynote/core';
-import { BranchConnectorsPlugin, readBranchOverride } from '../src/layout/branch-connectors';
+import {
+  BRANCH_CONNECTORS_PLUGIN_ID,
+  BranchConnectorsPlugin,
+  branchMemberOf,
+  readBranchOverride
+} from '../src/layout/branch-connectors';
 
 function makeNode(id: string, patch: Partial<NodeEntity> = {}): NodeEntity {
   return {
@@ -48,7 +53,7 @@ const outline: LayoutDefinition = {
     visit(tree.root);
     return positions;
   },
-  branch: () => ({
+  edge: () => ({
     router: 'orthogonal',
     fromAnchor: { x: 0, y: 1 },
     toAnchor: { x: 0, y: 0.5 },
@@ -93,24 +98,37 @@ describe('分支线来源', () => {
     expect(store.getView().content.connectors).toEqual({});
   });
 
-  it('生效值三层叠加：颜色、粗细、虚实、线型沿子树继承 (近者优先)，箭头与连接点只作用于本条', () => {
+  it('生效值叠加：整枝设置 (颜色、粗细、虚实、线型) 沿子树继承 (近者优先)，单线设置、箭头与连接点只作用于本条', () => {
     const { store, branch } = setup();
     store.updateNode('a', {
       layoutItem: {
-        branch: { style: { stroke: 'red', endArrow: 'arrow' }, router: 'curved', toAnchor: { x: 1, y: 1 } }
+        branch: {
+          branchStyle: { stroke: 'red', strokeWidth: 4 },
+          branchRouter: 'curved',
+          style: { strokeWidth: 1, endArrow: 'arrow' },
+          toAnchor: { x: 1, y: 1 }
+        }
       }
     });
-    expect(branch('a')).toMatchObject({ connectorType: 'curved', style: { stroke: 'red', endArrow: 'arrow' } });
+    // 本条：单线设置优先于整枝设置
+    expect(branch('a')).toMatchObject({
+      connectorType: 'curved',
+      style: { stroke: 'red', strokeWidth: 1, endArrow: 'arrow' }
+    });
     const child = branch('a1')!;
     expect(child).toMatchObject({
       connectorType: 'curved',
-      style: { stroke: 'red' },
+      style: { stroke: 'red', strokeWidth: 4 },
       to: { anchor: { x: 0, y: 0.5 } }
     });
     expect(child.style!.endArrow).toBeUndefined();
 
-    store.updateNode('a1', { layoutItem: { branch: { style: { stroke: 'blue' } } } });
+    store.updateNode('a1', { layoutItem: { branch: { branchStyle: { stroke: 'blue' } } } });
     expect(branch('a1')!.style!.stroke).toBe('blue');
+    // 单线设置不向下继承
+    store.updateNode('a', { layoutItem: { branch: { style: { stroke: 'green' }, router: 'straight' } } });
+    expect(branch('a')).toMatchObject({ connectorType: 'straight', style: { stroke: 'green' } });
+    expect(branch('a1')).toMatchObject({ connectorType: 'orthogonal', style: { stroke: 'blue' } });
   });
 
   it('对分支线的修改转写到成员 (与普通连线同样的合并语义)，一步撤销；没有实际变化不产生撤销；不能单独删除', () => {
@@ -118,6 +136,7 @@ describe('分支线来源', () => {
     const changes: DocumentChangeSet[] = [];
     store.subscribe((_view, _record, change) => changes.push(change));
 
+    // 直接修改分支线只作用于这一条：写进单线设置
     store.updateConnectors(['@branch:a1'], { style: { endArrow: 'arrow', strokeWidth: 3 } });
     // 端点等几何字段归布局，随同写入也被忽略
     store.updateConnector('@branch:a1', { connectorType: 'straight', to: { nodeId: 'a1', anchor: { x: 1, y: 0 } } });
@@ -131,13 +150,48 @@ describe('分支线来源', () => {
 
     expect(store.updateConnector('@branch:a1', { style: { strokeWidth: 3 } })).toBeNull();
     store.updateConnector('@branch:a1', { style: { endArrow: undefined } });
-    expect(store.getNode('a1')!.layoutItem!.branch).toMatchObject({ style: { strokeWidth: 3 } });
+    expect(store.getNode('a1')!.layoutItem!.branch).toEqual({ style: { strokeWidth: 3 }, router: 'straight' });
     store.undo();
     store.undo();
     expect(store.getNode('a1')!.layoutItem!.branch).toEqual({ style: { endArrow: 'arrow', strokeWidth: 3 } });
 
     expect(store.removeEntities({ connectorIds: ['@branch:a1'] })).toBeNull();
     expect(branch('a1')).toBeDefined();
+  });
+
+  it('选中成员修改整个分支：写进整枝设置并沿子树继承，去掉本条同名的单线设置；直接改线只影响这一条；一步撤销', () => {
+    const { engine, store, branch } = setup();
+    const plugin = engine.plugins.get(BRANCH_CONNECTORS_PLUGIN_ID) as BranchConnectorsPlugin;
+    // 先单独把 a 的线改成蓝色、a1 的线改成绿色
+    store.updateConnector('@branch:a', { style: { stroke: 'blue', endArrow: 'arrow' } });
+    store.updateConnector('@branch:a1', { style: { stroke: 'green' } });
+    expect(branch('a1')!.style!.stroke).toBe('green');
+
+    plugin.setBranchStyle(['a'], { stroke: 'red', strokeWidth: 4, router: 'curved' });
+    expect(store.getNode('a')!.layoutItem!.branch).toEqual({
+      style: { endArrow: 'arrow' },
+      branchStyle: { stroke: 'red', strokeWidth: 4 },
+      branchRouter: 'curved'
+    });
+    expect(branch('a')).toMatchObject({ connectorType: 'curved', style: { stroke: 'red', strokeWidth: 4 } });
+    // 子树中单独设置过的颜色保留，其余沿用整枝设置
+    expect(branch('a1')).toMatchObject({ connectorType: 'curved', style: { stroke: 'green', strokeWidth: 4 } });
+
+    // 恢复这条线：清除单线设置，整枝设置保留
+    plugin.clearLineStyle(['a']);
+    expect(store.getNode('a')!.layoutItem!.branch).toEqual({
+      branchStyle: { stroke: 'red', strokeWidth: 4 },
+      branchRouter: 'curved'
+    });
+    expect(branchMemberOf('@branch:a')).toBe('a');
+    expect(branchMemberOf('@other:a')).toBeUndefined();
+    store.undo();
+    store.undo();
+    expect(store.getNode('a')!.layoutItem!.branch).toEqual({ style: { stroke: 'blue', endArrow: 'arrow' } });
+    // 清除整枝设置中的某项
+    plugin.setBranchStyle(['a'], { stroke: 'red' });
+    plugin.setBranchStyle(['a'], { stroke: undefined });
+    expect(store.getNode('a')!.layoutItem!.branch).toEqual({ style: { endArrow: 'arrow' } });
   });
 
   it('分支线的端点不能改接 (写入被忽略)；去掉 layoutItem 或删除成员时分支线随之消失', () => {

@@ -633,6 +633,26 @@ describe('自由文本缩放', () => {
 });
 
 describe('旋转', () => {
+  it('布局成员没有旋转热区 (朝向由布局决定)；布局的根照常可旋转', () => {
+    const { engine, store, cursors } = setup();
+    engine.layouts.register({ id: 'test:keep', label: '保持', arrange: () => new Map() });
+    // frame (0,400 400×300) 为布局根，c (世界 20,420 160×100) 为成员
+    store.updateNode('frame', { layout: { type: 'test:keep' } });
+    store.updateNode('c', { layoutItem: {} });
+    const isRotateCursor = () =>
+      typeof cursors.at(-1) === 'object' && (cursors.at(-1) as { kind: string }).kind === 'rotate';
+
+    click(engine, { x: 100, y: 470 });
+    expect([...engine.session.selectedNodeIds]).toEqual(['c']);
+    pointer(engine, 'move', { x: 192, y: 532 });
+    expect(isRotateCursor()).toBe(false);
+
+    click(engine, { x: 300, y: 650 });
+    expect([...engine.session.selectedNodeIds]).toEqual(['frame']);
+    pointer(engine, 'move', { x: 412, y: 712 });
+    expect(isRotateCursor()).toBe(true);
+  });
+
   it('从角外热区拖动绕中心旋转，Shift 按 15° 吸附', () => {
     const { engine, store } = setup();
     click(engine, { x: 10, y: 10 });

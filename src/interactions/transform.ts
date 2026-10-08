@@ -42,6 +42,7 @@ import {
   type SkyNotePlugin,
   type WorldFrame
 } from '@skynote/core';
+import { isInstalledLayoutMember } from '../layout/layout-membership';
 
 export const TRANSFORM_PLUGIN_ID = '@skynote/plugins-basic/transform';
 const HANDLES_SESSION = 'transform:handles';
@@ -84,6 +85,8 @@ interface SelectionFrame {
   readonly scaleContentOnCorners: boolean;
   /** 可调整的尺寸方向：只能调一轴时不出现另一轴的边控制柄，拖角只改可调的一轴 (单选且节点类型声明时) */
   readonly resize: NodeResizeAxes;
+  /** 可旋转：含布局成员时不可 (成员的朝向由布局决定) */
+  readonly rotatable: boolean;
   /** 参与变换的节点 (最顶层、未锁定)，及其开始时的快照与世界外框 */
   readonly targets: readonly { node: NodeEntity; frame: WorldFrame }[];
 }
@@ -243,6 +246,7 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
         lockAspect: isAspectLocked(node, definition),
         scaleContentOnCorners: definition?.scaleContentOnCorners ?? false,
         resize: definition?.resize ?? 'both',
+        rotatable: !isInstalledLayoutMember(this.ctx, node.id),
         targets
       };
     }
@@ -268,6 +272,7 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
       lockAspect,
       scaleContentOnCorners: false,
       resize: 'both',
+      rotatable: !targets.some(({ node }) => isInstalledLayoutMember(this.ctx, node.id)),
       targets
     };
   }
@@ -325,7 +330,7 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     }
 
     const outside = local.x < 0 || local.x > frame.width || local.y < 0 || local.y > frame.height;
-    if (!outside) return null;
+    if (!outside || !selection.rotatable) return null;
     const rotateZone = ROTATE_ZONE_PX / zoom;
     for (const corner of CORNERS) {
       const p = this.handlePosition(frame, corner);
