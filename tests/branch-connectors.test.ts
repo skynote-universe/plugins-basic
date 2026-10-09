@@ -285,4 +285,3 @@ describe('分支线来源', () => {
     expect(branch('a')!.style!.stroke).toBe('orange');
   });
 });
-

@@ -194,6 +194,10 @@ describe('形状', () => {
     engine.documentStore.createNode({ nodeType: 'shape', id: 'd', x: 0, y: 0, options: { geometry: 'diamond' } });
     engine.documentStore.updateNode('d', { style: { fill: '$green' } });
 
+    expect(engine.documentStore.getNode('r')?.geometry).toBe('rectangle');
+    expect(engine.documentStore.getNode('e')?.geometry).toBe('ellipse');
+    expect(engine.documentStore.getNode('r')?.data).toBeUndefined();
+
     const [rect] = compose(engine, 'r');
     expect(rect).toMatchObject({ kind: 'rect', fill: theme.nodeFill, stroke: theme.nodeStroke, strokeWidth: 2 });
     expect(compose(engine, 'e')[0]).toMatchObject({ kind: 'ellipse', cx: 80, cy: 50, rx: 80, ry: 50 });

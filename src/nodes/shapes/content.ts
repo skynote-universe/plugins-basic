@@ -27,8 +27,10 @@ import {
 export const SHAPE_GEOMETRIES = ['rectangle', 'ellipse', 'diamond', 'triangle', 'star'] as const;
 export type ShapeGeometry = (typeof SHAPE_GEOMETRIES)[number];
 
-export interface ShapeData extends Record<string, unknown> {
-  geometry: ShapeGeometry;
+declare module '@skynote/core' {
+  interface CustomNodeFields {
+    geometry?: ShapeGeometry;
+  }
 }
 
 export const SHAPE_DEFAULT_SIZE = { width: 160, height: 100 } as const;
@@ -137,7 +139,7 @@ const GEOMETRY_OUTLINES: Record<ShapeGeometry, (w: number, h: number) => Point[]
 };
 
 function resolveGeometry(node: NodeEntity): ShapeGeometry {
-  const geometry = (node.data as Partial<ShapeData> | undefined)?.geometry;
+  const geometry = node.geometry;
   return geometry !== undefined && geometry in GEOMETRY_BUILDERS ? geometry : 'rectangle';
 }
 
@@ -159,7 +161,7 @@ export class ShapeNodeType implements NodeTypeDefinition {
 
   readonly type = ShapeNodeType.TYPE;
   readonly label = '形状';
-  readonly defaultData: ShapeData = { geometry: 'rectangle' };
+  readonly defaultData = {};
   readonly defaultStyle: NodeStyle = { strokeWidth: 2 };
   readonly sizingPolicy: NodeSizingPolicy = 'fixed';
   readonly slots: NodeTextSlotDefinition[] = [
@@ -184,7 +186,7 @@ export class ShapeNodeType implements NodeTypeDefinition {
     return {
       width: size.width,
       height: size.height,
-      data: { geometry: options.geometry ?? 'rectangle' },
+      geometry: options.geometry ?? 'rectangle',
       textBlocks: [{ id: LABEL_SLOT, slot: LABEL_SLOT, runs: [{ text: options.label ?? '' }] }]
     };
   }

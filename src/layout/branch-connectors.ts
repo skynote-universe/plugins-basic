@@ -365,12 +365,11 @@ export class BranchConnectorsPlugin implements SkyNotePlugin {
         if (areStructuredValuesEqual(branch, previous)) return {};
         const { branch: _previous, ...item } = layoutItem;
         // 布局成员必须保留 layoutItem；树根节点若 item 为空且 branch 也清空则恢复为 undefined
-        const nextLayoutItem =
-          branch
-            ? { ...item, branch }
-            : node.parentId !== undefined || Object.keys(item).length > 0
-              ? item
-              : undefined;
+        const nextLayoutItem = branch
+          ? { ...item, branch }
+          : node.parentId !== undefined || Object.keys(item).length > 0
+            ? item
+            : undefined;
         return { layoutItem: nextLayoutItem };
       },
       options
