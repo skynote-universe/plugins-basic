@@ -125,7 +125,7 @@ export function deriveBranchConnector(member: LayoutMember, spec: LayoutEdgeSpec
   const base = spec ?? FALLBACK_BRANCH;
   const inherited: Record<string, unknown> = {};
   let inheritedRouter: string | undefined;
-  for (let ancestor: LayoutMember | undefined = parent; ancestor?.parent; ancestor = ancestor.parent) {
+  for (let ancestor: LayoutMember | undefined = parent; ancestor; ancestor = ancestor.parent) {
     const branch = readBranchOverride(ancestor.item);
     if (!branch) continue;
     inheritedRouter ??= branch.branchRouter;
@@ -358,13 +358,20 @@ export class BranchConnectorsPlugin implements SkyNotePlugin {
     this.ctx.document.updateNodes(
       memberIds,
       (node) => {
-        if (!node.layoutItem) return {};
-        const previous = readBranchOverride(node.layoutItem);
+        const layoutItem = node.layoutItem ?? {};
+        const previous = readBranchOverride(layoutItem);
         const result = next(previous);
         const branch = result && Object.keys(result).length > 0 ? result : undefined;
         if (areStructuredValuesEqual(branch, previous)) return {};
-        const { branch: _previous, ...item } = node.layoutItem;
-        return { layoutItem: branch ? { ...item, branch } : item };
+        const { branch: _previous, ...item } = layoutItem;
+        // 布局成员必须保留 layoutItem；树根节点若 item 为空且 branch 也清空则恢复为 undefined
+        const nextLayoutItem =
+          branch
+            ? { ...item, branch }
+            : node.parentId !== undefined || Object.keys(item).length > 0
+              ? item
+              : undefined;
+        return { layoutItem: nextLayoutItem };
       },
       options
     );

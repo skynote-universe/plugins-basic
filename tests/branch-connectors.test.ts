@@ -246,4 +246,43 @@ describe('分支线来源', () => {
     engine.plugins.remove('test/outline');
     expect(branch().connectorType).toBe('straight');
   });
+
+  it('根节点设置分支样式：写进根节点的整枝设置，整树现有及新建成员继承，清除后整树恢复默认', () => {
+    const { engine, store, branch } = setup();
+    const plugin = engine.plugins.get(BRANCH_CONNECTORS_PLUGIN_ID) as BranchConnectorsPlugin;
+
+    // 初始状态：a, a1, b 均取大纲布局默认 (orthogonal, gray)
+    expect(branch('a')).toMatchObject({ connectorType: 'orthogonal', style: { stroke: 'gray' } });
+    expect(branch('a1')).toMatchObject({ connectorType: 'orthogonal', style: { stroke: 'gray' } });
+    expect(branch('b')).toMatchObject({ connectorType: 'orthogonal', style: { stroke: 'gray' } });
+
+    // 选中根节点修改分支样式：写进 root.layoutItem.branch
+    plugin.setBranchStyle(['root'], { stroke: 'purple', strokeWidth: 5, router: 'curved' });
+    expect(store.getNode('root')!.layoutItem?.branch).toEqual({
+      branchStyle: { stroke: 'purple', strokeWidth: 5 },
+      branchRouter: 'curved'
+    });
+
+    // 现有节点全部继承
+    expect(branch('a')).toMatchObject({ connectorType: 'curved', style: { stroke: 'purple', strokeWidth: 5 } });
+    expect(branch('a1')).toMatchObject({ connectorType: 'curved', style: { stroke: 'purple', strokeWidth: 5 } });
+    expect(branch('b')).toMatchObject({ connectorType: 'curved', style: { stroke: 'purple', strokeWidth: 5 } });
+
+    // 随后新建子节点 c，同样直接继承根节点分支样式，绝不会退回到默认灰色
+    store.addNode(makeNode('c', { parentId: 'root', zIndex: 'a2', layoutItem: {} }));
+    expect(branch('c')).toMatchObject({ connectorType: 'curved', style: { stroke: 'purple', strokeWidth: 5 } });
+
+    // 某个子分支 a 单独覆盖自己的分支颜色，优先于根节点继承值
+    plugin.setBranchStyle(['a'], { stroke: 'orange' });
+    expect(branch('a')!.style!.stroke).toBe('orange');
+    expect(branch('a1')!.style!.stroke).toBe('orange');
+    expect(branch('b')!.style!.stroke).toBe('purple');
+
+    // 根节点清除分支样式：整树（除了单独覆盖的 a）恢复布局默认
+    plugin.clearBranchStyle(['root']);
+    expect(store.getNode('root')!.layoutItem).toBeUndefined();
+    expect(branch('b')).toMatchObject({ connectorType: 'orthogonal', style: { stroke: 'gray' } });
+    expect(branch('a')!.style!.stroke).toBe('orange');
+  });
 });
+
