@@ -2,7 +2,7 @@
   "name": "@skynote/plugins-basic",
   "version": "0.1.0-beta.1",
   "type": "module",
-  "description": "SkyNote official basic nodes (sticky, text, shapes) and interactions",
+  "description": "SkyNote official basic nodes (sticky, text, shapes, images) and interactions",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -38,6 +38,10 @@
     "./shapes": {
       "types": "./src/nodes/shapes/index.ts",
       "import": "./src/nodes/shapes/index.ts"
+    },
+    "./image": {
+      "types": "./src/nodes/image/index.ts",
+      "import": "./src/nodes/image/index.ts"
     },
     "./interactions": {
       "types": "./src/interactions/index.ts",
@@ -77,6 +81,10 @@
       "./shapes": {
         "types": "./dist/shapes.d.ts",
         "import": "./dist/shapes.js"
+      },
+      "./image": {
+        "types": "./dist/image.d.ts",
+        "import": "./dist/image.js"
       },
       "./interactions": {
         "types": "./dist/interactions.d.ts",

@@ -7,6 +7,7 @@ export const config = defineConfig({
     sticky: 'src/nodes/sticky/index.ts',
     'free-text': 'src/nodes/free-text/index.ts',
     shapes: 'src/nodes/shapes/index.ts',
+    image: 'src/nodes/image/index.ts',
     interactions: 'src/interactions/index.ts'
   },
   format: 'esm',

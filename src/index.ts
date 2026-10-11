@@ -8,5 +8,6 @@ export * from './nodes/sticky';
 export * from './nodes/free-text';
 export * from './nodes/shapes';
 export * from './nodes/frame';
+export * from './nodes/image';
 export * from './layout/branch-connectors';
 export * from './interactions';

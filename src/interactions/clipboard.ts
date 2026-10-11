@@ -99,10 +99,23 @@ export class ClipboardPlugin implements SkyNotePlugin, ClipboardHandler, Pointer
     return data;
   }
 
-  paste(data: ClipboardData): boolean {
+  paste(data: ClipboardData, files?: readonly unknown[]): boolean {
     const json = data[NODE_CLIPBOARD_MIME];
     const parsed = json === undefined ? null : parseNodeClipboard(json);
     if (parsed?.ok) return this.pasteContent(json, parsed.value);
+    const imageFile = files?.find(
+      (file) =>
+        typeof file === 'object' &&
+        file !== null &&
+        'type' in file &&
+        String((file as { type?: unknown }).type).startsWith('image/')
+    );
+    if (imageFile !== undefined) {
+      void this.ctx.insertImage(imageFile, this.pointer ?? this.ctx.session.viewportCenter).catch((err: unknown) => {
+        console.warn('[SkyNote] 粘贴图片失败:', err);
+      });
+      return true;
+    }
     const text = data['text/plain']?.trim();
     return text ? this.pasteText(text) : false;
   }
