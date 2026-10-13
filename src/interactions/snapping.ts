@@ -12,6 +12,7 @@
 
 import {
   computeViewportWorldBounds,
+  isNodeHiddenByOpacity,
   type CanvasPluginContext,
   type CanvasPrimitive,
   type Point,
@@ -232,8 +233,14 @@ export function collectSnapTargets(ctx: CanvasPluginContext, movingIds: readonly
   const siblings: RectBounds[] = [];
   for (const id of spatial.search(computeViewportWorldBounds(session.viewport, session.viewportSize))) {
     const node = entities.getNode(id)?.entity;
-    // 完全透明的节点看不见，不作为对齐目标 (与连线吸附一致)
-    if (moving.has(id) || !node || node.parentId !== parentId || node.style?.opacity === 0) continue;
+    // 整节点透明时不作为对齐目标；局部透明语义由节点类型定义保留
+    if (
+      moving.has(id) ||
+      !node ||
+      node.parentId !== parentId ||
+      isNodeHiddenByOpacity(node, ctx.nodeTypes.get(node.nodeType))
+    )
+      continue;
     siblings.push(spatial.getBounds(id)!);
   }
   return new SnapTargets(siblings, parentId === undefined ? undefined : spatial.getBounds(parentId));

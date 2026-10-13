@@ -48,6 +48,7 @@ export class ImageNodeType implements NodeTypeDefinition {
   readonly defaultData = {};
   readonly defaultAspectLocked = true;
   readonly defaultStyle = { radius: 0 };
+  readonly opacityBehavior = 'renderer-defined' as const;
 
   createContent(options: ImageCreateOptions): NodeCreateContent {
     const { intrinsicWidth, intrinsicHeight } = options;
