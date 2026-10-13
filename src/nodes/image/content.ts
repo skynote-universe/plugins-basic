@@ -15,6 +15,7 @@ import type {
   NodeEntity,
   NodeTypeDefinition
 } from '@skynote/core';
+import { AssetAdapterError } from '@skynote/core';
 
 export interface ImageNodeFields {
   assetId: string;
@@ -49,6 +50,19 @@ export class ImageNodeType implements NodeTypeDefinition {
   readonly defaultAspectLocked = true;
   readonly defaultStyle = { radius: 0 };
   readonly opacityBehavior = 'renderer-defined' as const;
+  readonly assets = {
+    collect: (node: Readonly<NodeEntity>): readonly string[] => {
+      const image = node.image;
+      if (!image || typeof image.assetId !== 'string' || !image.assetId || !VALID_FITS.includes(image.fit))
+        throw new AssetAdapterError('invalid-reference', '图片资产引用或显示模式无效');
+      return [image.assetId];
+    },
+    remap: (node: Readonly<NodeEntity>, ids: ReadonlyMap<string, string>): { image: ImageNodeFields } => {
+      const assetId = ids.get(node.image!.assetId);
+      if (!assetId) throw new AssetAdapterError('invalid-reference', '缺少图片资产映射');
+      return { image: { ...node.image!, assetId } };
+    }
+  };
 
   createContent(options: ImageCreateOptions): NodeCreateContent {
     const { intrinsicWidth, intrinsicHeight } = options;

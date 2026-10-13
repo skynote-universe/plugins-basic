@@ -74,7 +74,7 @@ describe('画布剪贴板', () => {
       connectors: []
     });
     expect(engine.clipboard.paste({ [NODE_CLIPBOARD_MIME]: forged, 'text/plain': '回退文字' })).toBe(true);
-    expect(store.getNode(selected(engine)[0])!.textBlocks![0].runs[0].text).toBe('回退文字');
+    expect(store.getNode(selected(engine)[0])!.textBlocks![0].runs[0].text).toBe('来自外部');
     expect(engine.clipboard.paste({})).toBe(false);
   });
 

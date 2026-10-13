@@ -23,6 +23,7 @@ import {
   type PointerHooks,
   parseNodeClipboard,
   unionBounds,
+  AssetAdapterError,
   type CanvasPluginContext,
   type ClipboardData,
   type ClipboardHandler,
@@ -101,8 +102,12 @@ export class ClipboardPlugin implements SkyNotePlugin, ClipboardHandler, Pointer
 
   paste(data: ClipboardData, files?: readonly unknown[]): boolean {
     const json = data[NODE_CLIPBOARD_MIME];
-    const parsed = json === undefined ? null : parseNodeClipboard(json);
-    if (parsed?.ok) return this.pasteContent(json, parsed.value);
+    if (json !== undefined) {
+      const parsed = parseNodeClipboard(json);
+      if (parsed.ok) return this.pasteContent(json, parsed.value);
+      this.ctx.reportAssetFailure('paste-nodes', { code: 'invalid-reference', detail: parsed.error });
+      return true;
+    }
     const imageFile = files?.find(
       (file) =>
         typeof file === 'object' &&
@@ -111,9 +116,7 @@ export class ClipboardPlugin implements SkyNotePlugin, ClipboardHandler, Pointer
         String((file as { type?: unknown }).type).startsWith('image/')
     );
     if (imageFile !== undefined) {
-      void this.ctx.insertImage(imageFile, this.pointer ?? this.ctx.session.viewportCenter).catch((err: unknown) => {
-        console.warn('[SkyNote] 粘贴图片失败:', err);
-      });
+      void this.ctx.insertImage(imageFile, this.pointer ?? this.ctx.session.viewportCenter);
       return true;
     }
     const text = data['text/plain']?.trim();
@@ -122,7 +125,21 @@ export class ClipboardPlugin implements SkyNotePlugin, ClipboardHandler, Pointer
 
   /** 选中实体 → 画布数据 + 节点与连线上的文字；没有可复制的内容时为 null */
   private serialize(refs: EntityRefs): Record<string, string> | null {
-    const payload = this.ctx.document.copyEntities(refs);
+    let payload: NodeClipboardPayload | null;
+    try {
+      payload = this.ctx.document.copyEntities(refs);
+      if (payload && Object.keys(payload.assets).length > 0) {
+        if (!this.ctx.assetReferenceScope)
+          throw new AssetAdapterError('unsupported-source', '当前资产库不支持图片复制');
+        payload = { ...payload, source: { referenceScope: this.ctx.assetReferenceScope } };
+      }
+    } catch (error) {
+      this.ctx.reportAssetFailure('copy-nodes', {
+        code: error instanceof AssetAdapterError ? error.code : 'invalid-reference',
+        detail: error instanceof Error ? error.message : '图片复制失败'
+      });
+      return null;
+    }
     if (!payload) return null;
     // 节点与连线上的文字依次成行，粘贴到外部应用时内容不丢
     const text = [...payload.nodes, ...payload.connectors]
@@ -135,7 +152,12 @@ export class ClipboardPlugin implements SkyNotePlugin, ClipboardHandler, Pointer
 
   private pasteContent(key: string, payload: NodeClipboardPayload): boolean {
     const { session, document } = this.ctx;
-    const ids = document.pasteEntities(payload, this.placeSeries(key, this.boundsOf(payload)));
+    const offset = this.placeSeries(key, this.boundsOf(payload));
+    if (Object.keys(payload.assets).length > 0) {
+      void this.ctx.pasteNodesWithAssets(payload, offset);
+      return true;
+    }
+    const ids = document.pasteEntities(payload, offset);
     const pasted = ids.nodeIds.length + ids.connectorIds.length > 0;
     if (pasted) session.setSelection(ids);
     return pasted;
