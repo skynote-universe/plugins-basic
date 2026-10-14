@@ -51,6 +51,11 @@ export class ImageNodeType implements NodeTypeDefinition {
   readonly defaultStyle = { radius: 0 };
   readonly opacityBehavior = 'renderer-defined' as const;
   readonly assets = {
+    repair: (node: Readonly<NodeEntity>): { image: ImageNodeFields } | undefined => {
+      const image = node.image;
+      if (!image || typeof image.assetId !== 'string' || !image.assetId) return undefined;
+      return { image: { ...image, fit: VALID_FITS.includes(image.fit) ? image.fit : 'cover' } };
+    },
     collect: (node: Readonly<NodeEntity>): readonly string[] => {
       const image = node.image;
       if (!image || typeof image.assetId !== 'string' || !image.assetId || !VALID_FITS.includes(image.fit))
