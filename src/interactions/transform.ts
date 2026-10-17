@@ -377,16 +377,27 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     const isCorner = sign.x !== 0 && sign.y !== 0;
     const uniform =
       resize === 'both' && (selection.lockAspect || e.modifiers.shift || (isCorner && selection.scaleContentOnCorners));
+    const hasW = frame.width > 0;
+    const hasH = frame.height > 0;
     let scale = 1;
     if (uniform) {
-      // 取变化更大的一轴决定整体倍数；边控制柄只看被拖动的那一轴
-      scale =
-        sign.x === 0
-          ? height / frame.height
-          : sign.y === 0
-            ? width / frame.width
-            : Math.max(width / frame.width, height / frame.height);
-      scale = Math.max(scale, MIN_SIZE / Math.min(frame.width, frame.height));
+      if (hasW && hasH) {
+        // 取变化更大的一轴决定整体倍数；边控制柄只看被拖动的那一轴
+        scale =
+          sign.x === 0
+            ? height / frame.height
+            : sign.y === 0
+              ? width / frame.width
+              : Math.max(width / frame.width, height / frame.height);
+        scale = Math.max(scale, MIN_SIZE / Math.min(frame.width, frame.height));
+      } else if (hasW) {
+        scale = Math.max(width / frame.width, MIN_SIZE / frame.width);
+      } else if (hasH) {
+        scale = Math.max(height / frame.height, MIN_SIZE / frame.height);
+      } else {
+        const delta = Math.hypot(p.x - p0.x, p.y - p0.y) * factor;
+        scale = Math.max(0.1, (MIN_SIZE + delta) / MIN_SIZE);
+      }
       width = frame.width * scale;
       height = frame.height * scale;
     } else {
@@ -398,8 +409,8 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     const left = fromCenter || sign.x === 0 ? (frame.width - width) / 2 : sign.x > 0 ? 0 : frame.width - width;
     const top = fromCenter || sign.y === 0 ? (frame.height - height) / 2 : sign.y > 0 ? 0 : frame.height - height;
     const fromOld = computeFrameMatrix(frame);
-    const kx = width / frame.width;
-    const ky = height / frame.height;
+    const kx = hasW ? width / frame.width : scale;
+    const ky = hasH ? height / frame.height : scale;
     const { nodeTypes } = this.ctx;
     const origin = applyMatrix(fromOld, left, top);
 

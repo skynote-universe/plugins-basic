@@ -225,6 +225,39 @@ describe('框选', () => {
     pointer(engine, 'up', { x: 100, y: 90 }, { shift: true });
     expect(selection(engine)).toEqual(['a', 'b']);
   });
+
+  it('声明了 intersectsBounds 的斜向笔迹节点：选框仅擦过空白外框角时不误选，真正穿过笔迹时才选中', () => {
+    const { engine, store } = setup();
+    engine.nodeTypes.register({
+      type: 'test:diagonal-ink',
+      label: '斜笔迹',
+      defaultData: {},
+      // 局部对角线 (0,0) -> (100,100)
+      intersectsBounds: (_node, bounds) => Math.max(bounds.left, bounds.top) <= Math.min(bounds.right, bounds.bottom)
+    });
+    store.addNode({
+      id: 'ink1',
+      type: 'node',
+      nodeType: 'test:diagonal-ink',
+      x: 600,
+      y: 100,
+      width: 100,
+      height: 100,
+      rotation: 0,
+      zIndex: 'a3',
+      locked: false
+    });
+
+    // 从节点外空白处 (710, 95) 起拖，选框 [680, 95] ~ [710, 115] 与节点 AABB 相交，但只擦过右上空白角：不应选中 ink1
+    pointer(engine, 'down', { x: 710, y: 95 });
+    pointer(engine, 'move', { x: 680, y: 115 });
+    expect(selection(engine)).toEqual([]);
+
+    // 选框扩展到 [640, 95] ~ [710, 160]，穿过对角线：选中 ink1
+    pointer(engine, 'move', { x: 640, y: 160 });
+    expect(selection(engine)).toEqual(['ink1']);
+    pointer(engine, 'up', { x: 640, y: 160 });
+  });
 });
 
 describe('视口导航', () => {

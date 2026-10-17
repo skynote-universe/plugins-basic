@@ -133,7 +133,10 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
       const rect = boundsFromPoints(gesture.startWorld, e.point);
       this.drawMarquee(rect);
       const nodeHits = new Set(gesture.baseNodes);
-      for (const id of ctx.spatial.search(rect)) nodeHits.add(ctx.entities.getAncestorIds(id).at(-1) ?? id);
+      for (const id of ctx.spatial.search(rect)) {
+        if (!ctx.intersectsNodeBounds(id, rect)) continue;
+        nodeHits.add(ctx.entities.getAncestorIds(id).at(-1) ?? id);
+      }
       const connectorHits = new Set(gesture.baseConnectors);
       for (const id of ctx.connectors.connectorSpatialIndex.search(rect)) {
         const b = ctx.connectors.getConnectorRoute(id)!.bounds;

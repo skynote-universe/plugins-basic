@@ -485,20 +485,51 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
     if (!source) return;
     const { x, y } = this.quickPlacement(source, plus.side);
     const id = document.batch(() => {
+      const excludeSystemKeys = new Set([
+        'id',
+        'type',
+        'nodeType',
+        'parentId',
+        'x',
+        'y',
+        'width',
+        'height',
+        'rotation',
+        'zIndex',
+        'locked',
+        'textBlocks',
+        'textStyle'
+      ]);
+      const copiedProps: Record<string, unknown> = {};
+      for (const [key, val] of Object.entries(source)) {
+        if (!excludeSystemKeys.has(key) && val !== undefined) {
+          copiedProps[key] = clonePlainData(val);
+        }
+      }
+
+      const record = source as unknown as Record<string, unknown>;
+      const pathField = record.path as { subpaths?: unknown } | undefined;
+      const inkField = record.ink as { samples?: unknown; mode?: unknown } | undefined;
+
+      const flattenedOptions: Record<string, unknown> = {
+        ...copiedProps,
+        ...(pathField?.subpaths ? { subpaths: pathField.subpaths } : {}),
+        ...(inkField?.samples ? { samples: inkField.samples, mode: inkField.mode } : {})
+      };
+
       const nodeId = document.createNode({
         nodeType: source.nodeType,
         x,
         y,
         width: source.width,
         height: source.height,
-        ...(source.parentId !== undefined && { parentId: source.parentId })
+        ...(source.parentId !== undefined && { parentId: source.parentId }),
+        options: flattenedOptions
       });
       if (!nodeId) return null;
-      const copied: Partial<NodeEntity> = {
-        ...(source.style && { style: clonePlainData(source.style) as NodeEntity['style'] }),
-        ...(source.data && { data: clonePlainData(source.data) as NodeEntity['data'] })
-      };
-      if (Object.keys(copied).length > 0) document.updateNode(nodeId, copied, { merge: false });
+      if (Object.keys(copiedProps).length > 0) {
+        document.updateNode(nodeId, copiedProps as Partial<NodeEntity>, { merge: false });
+      }
       document.createConnector({
         connectorType: this.connectorType,
         from: { nodeId: source.id },

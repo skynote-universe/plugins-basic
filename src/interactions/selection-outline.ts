@@ -78,7 +78,7 @@ export class SelectionOutlinePlugin implements SkyNotePlugin, PointerHooks {
       return;
     }
     const m = entities.getWorldTransform(node.id)!;
-    const local = nodeTypes.get(node.nodeType)?.outline?.(node as NodeEntity) ?? [
+    const local = nodeTypes.getValid(node)?.outline?.(node as NodeEntity) ?? [
       { x: 0, y: 0 },
       { x: node.width, y: 0 },
       { x: node.width, y: node.height },
@@ -136,7 +136,11 @@ export class SelectionOutlinePlugin implements SkyNotePlugin, PointerHooks {
       const target = session.textEditing;
       const editing = target?.kind === 'node' && target.id === id ? target : null;
       if (editing?.composition && fonts) {
-        const size = computeTextLayout(this.withComposition(entity, editing), nodeTypes.get(entity.nodeType), fonts);
+        const size = computeTextLayout(
+          this.withComposition(entity, editing),
+          nodeTypes.getValid(entity, runtimeNode.runtime.dataVersion),
+          fonts
+        );
         if (size) ({ width, height } = size);
       }
 
@@ -160,7 +164,7 @@ export class SelectionOutlinePlugin implements SkyNotePlugin, PointerHooks {
 
   /** 编辑块插入组合文字后的节点 (只用于测量) */
   private withComposition(node: Readonly<NodeEntity>, editing: TextEditingTarget): NodeEntity {
-    const definition = this.ctx.nodeTypes.get(node.nodeType);
+    const definition = this.ctx.nodeTypes.getValid(node);
     const textBlocks = node.textBlocks!.map((block) =>
       block.id === editing.blockId
         ? {
