@@ -55,7 +55,10 @@ export class SelectionOutlinePlugin implements SkyNotePlugin, PointerHooks {
   }
 
   onPointerMove(e: CanvasPointerEvent): void {
-    if (this.pointerPressed) return;
+    if (this.pointerPressed || this.ctx.session.isReadOnly) {
+      this.setHover(null);
+      return;
+    }
     const node = this.ctx.hitTestNode(e.point);
     this.setHover(node && !this.ctx.session.selectedNodeIds.has(node.id) ? node : null);
   }
@@ -99,11 +102,22 @@ export class SelectionOutlinePlugin implements SkyNotePlugin, PointerHooks {
   }
 
   private onSessionChange(change: SessionChange): void {
+    if (change.readOnlyChanged && this.ctx.session.isReadOnly) {
+      this.setHover(null);
+      this.redraw();
+      return;
+    }
     const zoomChanged = change.viewportChanged && this.ctx.session.viewport.zoom !== this.drawnZoom;
     if (this.hoveredId && (change.viewportChanged || this.ctx.session.selectedNodeIds.has(this.hoveredId))) {
       this.setHover(null);
     }
-    if (change.toggledNodeIds.size > 0 || zoomChanged || change.themeChanged || change.textEditingChanged) {
+    if (
+      change.toggledNodeIds.size > 0 ||
+      zoomChanged ||
+      change.themeChanged ||
+      change.textEditingChanged ||
+      change.readOnlyChanged
+    ) {
       this.redraw();
     }
   }
@@ -123,6 +137,10 @@ export class SelectionOutlinePlugin implements SkyNotePlugin, PointerHooks {
 
   private redraw(): void {
     const { session, entities, host, nodeTypes } = this.ctx;
+    if (session.isReadOnly) {
+      host.overlay.clear(OUTLINE_SESSION);
+      return;
+    }
     const fonts = this.ctx.document.fonts;
     this.drawnZoom = session.viewport.zoom;
     const primitives: CanvasPrimitive[] = [];

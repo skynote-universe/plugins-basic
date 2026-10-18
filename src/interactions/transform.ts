@@ -146,7 +146,7 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   onPointerDown(e: CanvasPointerEvent): void {
-    if (e.isClaimed || e.button !== 0 || this.gesture) return;
+    if (this.ctx.session.isReadOnly || e.isClaimed || e.button !== 0 || this.gesture) return;
     const selection = this.selection;
     const hit = selection && this.hitHandle(selection, e.point);
     if (!selection || !hit) return;
@@ -466,6 +466,11 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
 
   /** 悬停在控制柄上时显示对应光标 (缩放光标精确对准控制柄方向，随外框旋转)，离开时复位 */
   private updateHoverCursor(e: CanvasPointerEvent): void {
+    if (this.ctx.session.isReadOnly) {
+      if (this.hoverCursorSet) this.ctx.host.setCursor('default');
+      this.hoverCursorSet = false;
+      return;
+    }
     const selection = this.selection;
     const hit = selection && !e.isClaimed ? this.hitHandle(selection, e.point) : null;
     if (!selection || !hit) {
@@ -484,7 +489,13 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   private onSessionChange(change: SessionChange): void {
-    const selectionChanged = change.toggledNodeIds.size > 0 || change.textEditingChanged;
+    if (change.readOnlyChanged && this.ctx.session.isReadOnly) {
+      if (this.gesture) this.finish(this.gesture.pointerId);
+      this.selectionCache = undefined;
+      this.redraw();
+      return;
+    }
+    const selectionChanged = change.toggledNodeIds.size > 0 || change.textEditingChanged || change.readOnlyChanged;
     if (selectionChanged) this.selectionCache = undefined;
     // 平移不改变世界坐标中的控制柄，只有缩放 (控制柄屏幕尺寸固定) 需要重画
     const zoomChanged = change.viewportChanged && this.ctx.session.viewport.zoom !== this.drawnZoom;
@@ -508,7 +519,7 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
   private redraw(): void {
     const { session, host } = this.ctx;
     const { selection } = this;
-    if (!selection) {
+    if (!selection || session.isReadOnly) {
       host.overlay.clear(HANDLES_SESSION);
       return;
     }

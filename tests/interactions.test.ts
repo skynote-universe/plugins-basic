@@ -490,7 +490,7 @@ function click(engine: Engine, point: Point, init: Partial<{ shift: boolean }> =
 }
 
 /** 从 from 拖到 to (逐帧提交，同一 groupId) */
-function drag(engine: Engine, from: Point, to: Point, init: Partial<{ shift: boolean; alt: boolean }> = {}) {
+function drag(engine: Engine, from: Point, to: Point, init: Parameters<typeof pointer>[3] = {}) {
   pointer(engine, 'down', from, init);
   pointer(engine, 'move', to, init);
   pointer(engine, 'up', to, init);
@@ -730,5 +730,46 @@ describe('失焦复位', () => {
     const before = { ...engine.session.viewport };
     drag(engine, { x: 700, y: 300 }, { x: 750, y: 350 });
     expect(engine.session.viewport).toEqual(before);
+  });
+});
+
+describe('只读浏览模式 (View-Only Mode)', () => {
+  it('只读模式下阻止选择、移动与快捷键修改，但保留视口滚轮缩放与中键平移', () => {
+    const { engine, store } = setup();
+    const initialPos = { x: store.getNode('a')!.x, y: store.getNode('a')!.y };
+
+    engine.session.setReadOnly(true);
+
+    // 1. 尝试点击与框选节点：不被选中，节点也不发生位移
+    click(engine, { x: 50, y: 50 });
+    expect(engine.session.selectedNodeIds.size).toBe(0);
+
+    drag(engine, { x: 50, y: 50 }, { x: 150, y: 150 });
+    expect(store.getNode('a')!.x).toBe(initialPos.x);
+    expect(store.getNode('a')!.y).toBe(initialPos.y);
+
+    // 2. 尝试编辑快捷键 (全选、删除)：受阻
+    key(engine, 'KeyA', { ctrlKey: true });
+    expect(engine.session.selectedNodeIds.size).toBe(0);
+
+    key(engine, 'Delete', { key: 'Delete' });
+    expect(store.getNode('a')).toBeDefined();
+
+    // 3. 视口交互依然正常运作：鼠标中键拖拽平移
+    const initialViewport = { ...engine.session.viewport };
+    drag(engine, { x: 500, y: 400 }, { x: 550, y: 450 }, { button: 1 });
+    expect(engine.session.viewport.x).toBe(initialViewport.x + 50);
+    expect(engine.session.viewport.y).toBe(initialViewport.y + 50);
+
+    // 4. 视口交互依然正常运作：滚轮缩放
+    const currentZoom = engine.session.viewport.zoom;
+    engine.pointer.dispatchWheel(
+      new SyntheticWheelEvent({
+        deltaZoom: Math.log(1.2),
+        deltaPan: { x: 0, y: 0 },
+        centerPoint: { x: 500, y: 400 }
+      })
+    );
+    expect(engine.session.viewport.zoom).toBeCloseTo(currentZoom * 1.2);
   });
 });

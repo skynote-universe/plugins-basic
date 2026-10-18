@@ -183,6 +183,10 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   onPointerDown(e: CanvasPointerEvent): void {
+    if (this.ctx.session.isReadOnly) {
+      this.clearPlus();
+      return;
+    }
     this.pointerPressed = true;
     if (e.isClaimed || this.draft || e.button !== 0) {
       this.clearPlus();
@@ -199,6 +203,10 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   onPointerMove(e: CanvasPointerEvent): void {
+    if (this.ctx.session.isReadOnly) {
+      this.clearPlus();
+      return;
+    }
     const { draft } = this;
     if (draft) {
       if (draft.pointerId !== e.pointerId) return;
@@ -278,6 +286,13 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   private onSessionChange(change: SessionChange): void {
+    if (change.readOnlyChanged && this.ctx.session.isReadOnly) {
+      if (this.draft) this.finishDraft();
+      this.clearPlus();
+      this.ctx.host.overlay.clear(HINT_SESSION);
+      this.ctx.host.setCursor('default');
+      return;
+    }
     if (change.toolChanged) {
       if (this.active) {
         this.ctx.host.setCursor('crosshair');
@@ -360,6 +375,7 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
     if (
       !node ||
       node.locked ||
+      session.isReadOnly ||
       this.active ||
       this.draft ||
       this.pointerPressed ||

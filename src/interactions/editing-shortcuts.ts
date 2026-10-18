@@ -48,6 +48,7 @@ export class EditingShortcutsPlugin implements SkyNotePlugin {
   }
 
   private onKeyDown(e: CanvasKeyboardEvent): boolean {
+    if (this.ctx.session.isReadOnly) return false;
     const mod = e.ctrlKey || e.metaKey;
     const { document, session, entities } = this.ctx;
 

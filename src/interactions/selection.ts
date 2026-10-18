@@ -91,6 +91,11 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
   install(ctx: CanvasPluginContext): void {
     this.ctx = ctx;
     ctx.registerPointerHooks(this);
+    ctx.onSessionChange((change) => {
+      if (change.readOnlyChanged && ctx.session.isReadOnly && this.gesture) {
+        this.finish(this.gesture.pointerId);
+      }
+    });
   }
 
   unmount(): void {
@@ -98,7 +103,7 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   onPointerDown(e: CanvasPointerEvent): void {
-    if (e.isClaimed || e.button !== 0 || this.gesture) return;
+    if (this.ctx.session.isReadOnly || e.isClaimed || e.button !== 0 || this.gesture) return;
     const hit = this.ctx.hitTest(e.point);
     const target: PressTarget | null =
       hit?.kind === 'connector'

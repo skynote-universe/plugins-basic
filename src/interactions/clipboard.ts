@@ -88,6 +88,7 @@ export class ClipboardPlugin implements SkyNotePlugin, ClipboardHandler, Pointer
   }
 
   cut(): ClipboardData | null {
+    if (this.ctx.session.isReadOnly) return null;
     const { session, entities, document } = this.ctx;
     const refs = {
       nodeIds: [...session.selectedNodeIds].filter((id) => !entities.getNode(id)?.entity.locked),
@@ -101,6 +102,7 @@ export class ClipboardPlugin implements SkyNotePlugin, ClipboardHandler, Pointer
   }
 
   paste(data: ClipboardData, files?: readonly unknown[]): boolean {
+    if (this.ctx.session.isReadOnly) return false;
     const json = data[NODE_CLIPBOARD_MIME];
     if (json !== undefined) {
       const parsed = parseNodeClipboard(json);

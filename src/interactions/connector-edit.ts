@@ -101,6 +101,10 @@ export class ConnectorEditPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   onPointerDown(e: CanvasPointerEvent): void {
+    if (this.ctx.session.isReadOnly) {
+      this.setHover(null);
+      return;
+    }
     this.pointerPressed = true;
     this.setHover(null);
     // Shift 点击用于增减选区 (含点在文字或手柄上)，交给选择插件
@@ -136,6 +140,12 @@ export class ConnectorEditPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   onPointerMove(e: CanvasPointerEvent): void {
+    if (this.ctx.session.isReadOnly) {
+      this.setHover(null);
+      if (this.handleCursorSet) this.ctx.host.setCursor('default');
+      this.handleCursorSet = false;
+      return;
+    }
     const { drag, ctx } = this;
     if (!drag) {
       if (this.pointerPressed || e.isClaimed) return;
@@ -273,6 +283,12 @@ export class ConnectorEditPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   private onSessionChange(change: SessionChange): void {
+    if (change.readOnlyChanged && this.ctx.session.isReadOnly) {
+      if (this.drag) this.finishDrag();
+      this.setHover(null);
+      this.redraw();
+      return;
+    }
     const zoomChanged = change.viewportChanged && this.ctx.session.viewport.zoom !== this.drawnZoom;
     if (this.hoveredId && (change.viewportChanged || this.ctx.session.selectedConnectorIds.has(this.hoveredId))) {
       this.setHover(null);
@@ -282,7 +298,8 @@ export class ConnectorEditPlugin implements SkyNotePlugin, PointerHooks {
       change.toggledNodeIds.size > 0 ||
       zoomChanged ||
       change.themeChanged ||
-      change.textEditingChanged
+      change.textEditingChanged ||
+      change.readOnlyChanged
     ) {
       this.redraw();
     }
@@ -306,6 +323,10 @@ export class ConnectorEditPlugin implements SkyNotePlugin, PointerHooks {
   /** 选中连线沿路由描边；单独选中一条时画出编辑手柄 (段中点在下，拐点与端点在上) */
   private redraw(): void {
     const { ctx } = this;
+    if (ctx.session.isReadOnly) {
+      ctx.host.overlay.clear(SELECTED_SESSION);
+      return;
+    }
     const { theme, viewport, selectedConnectorIds } = ctx.session;
     this.drawnZoom = viewport.zoom;
     const unit = 1 / viewport.zoom;

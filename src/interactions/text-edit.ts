@@ -376,6 +376,10 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
   // ================= 指针 =================
 
   onPointerDown(e: CanvasPointerEvent): void {
+    if (this.ctx.session.isReadOnly) {
+      if (this.state) this.exit();
+      return;
+    }
     if (e.isClaimed || e.button !== 0) return;
     const { state } = this;
     if (state) {
@@ -405,6 +409,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   onPointerMove(e: CanvasPointerEvent): void {
+    if (this.ctx.session.isReadOnly) return;
     const { state, drag } = this;
     const geometry = state && this.geometry(state);
     if (!state || !geometry) return;
@@ -471,6 +476,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
 
   /** 按请求进入节点编辑：优先取框内的第一个文字块 (没有时取框外的，如画框标题) 并全选 */
   private enterNodeSelectingAll(nodeId: string): void {
+    if (this.ctx.session.isReadOnly) return;
     const node = this.ctx.document.getNode(nodeId);
     if (!node || node.locked) return;
     const blocks = this.textPrimitives(node);
@@ -487,6 +493,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
    * 新建与随后的输入同组撤销，什么都没输入就退出时移除
    */
   private enterConnector(connector: Readonly<ConnectorEntity>, point: Point): boolean {
+    if (this.ctx.session.isReadOnly) return false;
     const route = this.ctx.connectors.getConnectorRoute(connector.id);
     if (!route || !this.ctx.document.fonts) return false;
     const groupId = generateId('text-edit');
@@ -1190,6 +1197,10 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
   // ================= 外部变化 =================
 
   private onSessionChange(change: SessionChange): void {
+    if (this.ctx.session.isReadOnly) {
+      if (this.state) this.exit();
+      return;
+    }
     const { state } = this;
     if (!state) {
       // 未编辑时格式目标是选中节点
