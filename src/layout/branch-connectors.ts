@@ -228,7 +228,13 @@ class BranchConnectorSource implements DerivedConnectorSource {
         continue;
       }
       const tree = trees.get(findMemberRootId(id, this.getNode)!)!;
-      const spec = this.ctx.layouts.get(tree.root.node.layout!.type)?.edge?.(member, tree);
+      const definition = this.ctx.layouts.get(tree.root.node.layout!.type);
+      // 已安装的容器布局 (如 stack) 未声明树边 edge() 时不派生分支连线；未安装的布局仍按浮动端直线降级绘制
+      if (definition && !definition.edge) {
+        result.set(id, undefined);
+        continue;
+      }
+      const spec = definition?.edge?.(member, tree);
       result.set(id, deriveBranchConnector(member, spec));
     }
     return result;

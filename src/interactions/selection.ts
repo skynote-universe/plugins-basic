@@ -26,6 +26,9 @@ import {
   applyMatrix,
   boundsFromPoints,
   generateId,
+  generateNKeysBetween,
+  invertMatrix,
+  sortSiblingsByLayer,
   unionBounds,
   type CanvasPluginContext,
   type CanvasPointerEvent,
@@ -35,7 +38,9 @@ import {
   type SkyNotePlugin
 } from '@skynote/core';
 import { SNAP_THRESHOLD_PX, collectSnapTargets, drawSnapGuides, type SnapTargets } from './snapping';
-import { isInInstalledLayout } from '../layout/layout-membership';
+import { resolveGroupTarget } from './group-selection';
+import { canAcceptLayoutChildren, isInstalledLayoutMember, isStackLayoutMember } from '../layout/layout-membership';
+import { STACK_LAYOUT_ID, computeStackInsertIndex } from '../layout/stack-layout';
 
 export const SELECTION_PLUGIN_ID = '@skynote/plugins-basic/selection';
 const MARQUEE_SESSION = 'selection:marquee';
@@ -99,17 +104,20 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   unmount(): void {
-    this.gesture = null;
+    if (this.gesture) this.finish(this.gesture.pointerId);
+    else this.releaseHeldMembers();
   }
 
   onPointerDown(e: CanvasPointerEvent): void {
     if (this.ctx.session.isReadOnly || e.isClaimed || e.button !== 0 || this.gesture) return;
     const hit = this.ctx.hitTest(e.point);
+    const deep = e.modifiers.ctrl || e.modifiers.meta;
+    const drillDown = e.clickCount === 2 && !e.modifiers.shift && !deep;
     const target: PressTarget | null =
       hit?.kind === 'connector'
         ? { kind: 'connector', id: hit.connector.id }
         : e.target
-          ? { kind: 'node', id: e.target.id }
+          ? { kind: 'node', id: resolveGroupTarget(this.ctx, e.target.id, { deep, drillDown }) }
           : null;
     if (target) {
       this.press(target, e);
@@ -162,6 +170,8 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
       gesture.snap = this.prepareSnap();
     }
     const movable = [...ctx.session.selectedNodeIds].filter((id) => !ctx.entities.getNode(id)?.entity.locked);
+    // 被拖的堆叠成员跟随指针：托管后仍占据槽位参与排版，但布局派生不把它们排回原位
+    ctx.document.holdLayoutMembers(movable.filter((id) => isStackLayoutMember(ctx, id)));
     const total = { x: e.point.x - gesture.startWorld.x, y: e.point.y - gesture.startWorld.y };
     const { snap } = gesture;
     if (snap && !e.modifiers.ctrl && !e.modifiers.meta) {
@@ -183,13 +193,22 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
     }
     const delta = { x: total.x - gesture.moved.x, y: total.y - gesture.moved.y };
     if (delta.x !== 0 || delta.y !== 0) {
+      const freeMovable = movable.filter((id) => !isInstalledLayoutMember(ctx, id) || isStackLayoutMember(ctx, id));
       const connectorIds = [...ctx.session.selectedConnectorIds].filter(
         (id) => !ctx.entities.getConnector(id)?.entity.locked
       );
-      ctx.document.moveEntities({ nodeIds: movable, connectorIds }, delta, { groupId: gesture.groupId, label: '移动' });
+      if (freeMovable.length > 0 || connectorIds.length > 0) {
+        ctx.document.moveEntities({ nodeIds: freeMovable, connectorIds }, delta, {
+          groupId: gesture.groupId,
+          label: '移动'
+        });
+      }
       gesture.moved = total;
     }
-    if (movable.length > 0) gesture.dropTarget = this.updateDropTarget(movable, e.point);
+    if (movable.length > 0) {
+      gesture.dropTarget = this.updateDropTarget(movable, e.point);
+      this.reorderStackDuringDrag(gesture.dropTarget, e.point, gesture.groupId);
+    }
   }
 
   onPointerUp(e: CanvasPointerEvent): void {
@@ -203,13 +222,66 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
         [selectionKey(gesture.target.kind)]: [gesture.target.id]
       });
     }
-    if (gesture.kind === 'press' && gesture.dragging) this.drop(gesture.dropTarget, gesture.groupId);
+    // 先在托管状态下完成改挂 / 换序 (拖出画框的成员保持松手处的世界位置)，再由 finish 释放并归位
+    if (gesture.kind === 'press' && gesture.dragging) {
+      this.drop(gesture.dropTarget, e.point, gesture.moved, gesture.groupId);
+    }
     this.finish(e.pointerId);
   }
 
   onPointerCancel(e: CanvasPointerEvent): void {
-    // 被系统打断时保留已发生的移动 (与正常松手一致)，只清理手势与瞬态图元
-    if (this.gesture?.pointerId === e.pointerId) this.finish(e.pointerId);
+    // 被系统打断时保留已发生的移动 (与正常松手一致)，清理手势与瞬态图元；finish 会把堆叠成员归位
+    if (this.gesture?.pointerId !== e.pointerId) return;
+    this.finish(e.pointerId);
+  }
+
+  /** 在自动堆叠画框内部拖拽已属于该画框的子成员时，跨过中线实时交换兄弟槽位顺序 */
+  private reorderStackDuringDrag(targetId: string | undefined, pointerWorld: Point, groupId: string): void {
+    if (targetId === undefined) return;
+    const { ctx } = this;
+    const targetNode = ctx.document.getNode(targetId);
+    if (targetNode?.layout?.type !== STACK_LAYOUT_ID || ctx.layouts.get(STACK_LAYOUT_ID) === undefined) return;
+
+    const memberIds = [...ctx.session.selectedNodeIds].filter((id) => {
+      const node = ctx.document.getNode(id);
+      return node !== undefined && !node.locked && node.parentId === targetId && node.layoutItem !== undefined;
+    });
+    if (memberIds.length === 0) return;
+
+    const orderedNodes = sortSiblingsByLayer(memberIds.map((id) => ctx.document.getNode(id)!));
+    const orderedIds = orderedNodes.map((n) => n.id);
+    const draggedSet = new Set(orderedIds);
+    const allCurrentMembers = sortSiblingsByLayer(
+      [...ctx.entities.getChildIds(targetId)]
+        .map((id) => ctx.document.getNode(id)!)
+        .filter((n) => n.layoutItem !== undefined)
+    );
+    const remainingMembers = allCurrentMembers.filter((n) => !draggedSet.has(n.id));
+    if (remainingMembers.length === 0) return;
+
+    const toLocal = invertMatrix(ctx.entities.getWorldTransform(targetId)!);
+    const localPoint = applyMatrix(toLocal, pointerWorld.x, pointerWorld.y);
+    const insertIndex = computeStackInsertIndex(targetNode, remainingMembers, localPoint);
+    const nextMemberIds = [
+      ...remainingMembers.slice(0, insertIndex).map((m) => m.id),
+      ...orderedIds,
+      ...remainingMembers.slice(insertIndex).map((m) => m.id)
+    ];
+    if (
+      allCurrentMembers.length === nextMemberIds.length &&
+      allCurrentMembers.every((m, i) => m.id === nextMemberIds[i])
+    ) {
+      return;
+    }
+
+    const prevKey = insertIndex > 0 ? remainingMembers[insertIndex - 1].zIndex : null;
+    const nextKey = insertIndex < remainingMembers.length ? remainingMembers[insertIndex].zIndex : null;
+    const keys = generateNKeysBetween(prevKey, nextKey, orderedIds.length);
+    const keyOf = new Map(orderedIds.map((id, i) => [id, keys[i]]));
+    ctx.document.updateNodes(orderedIds, (node) => ({ zIndex: keyOf.get(node.id)! }), {
+      groupId,
+      label: '调整布局顺序'
+    });
   }
 
   private press(target: PressTarget, e: CanvasPointerEvent): void {
@@ -283,7 +355,7 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
     const target = ctx.hitTestNode(
       point,
       (node) =>
-        (!!ctx.nodeTypes.get(node.nodeType)?.acceptsChildren || isInInstalledLayout(ctx, node.id)) &&
+        (!!ctx.nodeTypes.get(node.nodeType)?.acceptsChildren || canAcceptLayoutChildren(ctx, node.id)) &&
         !dragged.has(node.id) &&
         !ctx.entities.getAncestorIds(node.id).some((id) => dragged.has(id))
     );
@@ -314,9 +386,71 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
     return target.id;
   }
 
-  /** 松手：把被拖的节点改挂到拖放目标 (保持在世界中的位置不变)，与本次移动同组撤销 */
-  private drop(targetId: string | undefined, groupId: string): void {
+  /** 松手：把被拖的节点改挂到拖放目标 (保持在世界中的位置不变) 或在自动堆叠画框内按落点换序并归位，与本次移动同组撤销 */
+  private drop(targetId: string | undefined, dropPoint: Point, moved: Point, groupId: string): void {
     const { ctx } = this;
+    const targetNode = targetId === undefined ? undefined : ctx.document.getNode(targetId);
+    const isStackTarget =
+      targetNode?.layout?.type === STACK_LAYOUT_ID && ctx.layouts.get(STACK_LAYOUT_ID) !== undefined;
+
+    if (isStackTarget && targetId !== undefined) {
+      const stackIds = [...ctx.session.selectedNodeIds].filter((id) => {
+        const node = ctx.entities.getNode(id)?.entity;
+        if (!node || node.locked || id === targetId) return false;
+        if (node.parentId === targetId) return true;
+        const parent = node.parentId === undefined ? undefined : ctx.entities.getNode(node.parentId)?.entity;
+        return !parent || !!ctx.nodeTypes.get(parent.nodeType)?.acceptsChildren;
+      });
+      if (stackIds.length === 0) return;
+
+      const orderedNodes = sortSiblingsByLayer(stackIds.map((id) => ctx.document.getNode(id)!));
+      const orderedIds = orderedNodes.map((n) => n.id);
+      const stackIdSet = new Set(orderedIds);
+      const allCurrentMembers = sortSiblingsByLayer(
+        [...ctx.entities.getChildIds(targetId)]
+          .map((id) => ctx.document.getNode(id)!)
+          .filter((n) => n.layoutItem !== undefined)
+      );
+      const remainingMembers = allCurrentMembers.filter((n) => !stackIdSet.has(n.id));
+      const toLocal = invertMatrix(ctx.entities.getWorldTransform(targetId)!);
+      const localPoint = applyMatrix(toLocal, dropPoint.x, dropPoint.y);
+      const insertIndex = computeStackInsertIndex(targetNode, remainingMembers, localPoint);
+      const enteringIds = orderedIds.filter((id) => ctx.document.getNode(id)?.parentId !== targetId);
+      const nextMemberIds = [
+        ...remainingMembers.slice(0, insertIndex).map((m) => m.id),
+        ...orderedIds,
+        ...remainingMembers.slice(insertIndex).map((m) => m.id)
+      ];
+      if (
+        enteringIds.length === 0 &&
+        orderedNodes.every((n) => n.layoutItem !== undefined) &&
+        allCurrentMembers.length === nextMemberIds.length &&
+        allCurrentMembers.every((m, i) => m.id === nextMemberIds[i])
+      ) {
+        // 顺序未变 (或已在拖拽中实时换序)：无需改写，finish 释放托管成员时会把它们吸附回槽位
+        return;
+      }
+
+      const prevKey = insertIndex > 0 ? remainingMembers[insertIndex - 1].zIndex : null;
+      const nextKey = insertIndex < remainingMembers.length ? remainingMembers[insertIndex].zIndex : null;
+      const keys = generateNKeysBetween(prevKey, nextKey, orderedIds.length);
+      const keyOf = new Map(orderedIds.map((id, i) => [id, keys[i]]));
+      const label = enteringIds.length > 0 ? '加入布局' : '调整布局顺序';
+
+      if (enteringIds.length > 0) {
+        ctx.document.reparentNodes(enteringIds, targetId, { groupId, label });
+      }
+      ctx.document.updateNodes(
+        orderedIds,
+        (node) => ({
+          zIndex: keyOf.get(node.id)!,
+          ...(node.layoutItem ? {} : { layoutItem: {} })
+        }),
+        { groupId, label }
+      );
+      return;
+    }
+
     const ids = [...ctx.session.selectedNodeIds].filter((id) => {
       const node = ctx.entities.getNode(id)?.entity;
       if (!node || node.locked || node.parentId === targetId) return false;
@@ -325,8 +459,20 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
       return !parent || !!ctx.nodeTypes.get(parent.nodeType)?.acceptsChildren;
     });
     if (ids.length === 0) return;
-    if (targetId === undefined || !isInInstalledLayout(ctx, targetId)) {
-      ctx.document.reparentNodes(ids, targetId, { groupId, label: targetId ? '移入容器' : '移出容器' });
+    if (targetId === undefined || !canAcceptLayoutChildren(ctx, targetId)) {
+      const label = targetId ? '移入容器' : '移出容器';
+      const leavingLayoutIds = ids.filter((id) => isInstalledLayoutMember(ctx, id));
+      const unmovedLayoutIds = leavingLayoutIds.filter((id) => !isStackLayoutMember(ctx, id));
+      ctx.document.reparentNodes(ids, targetId, { groupId, label });
+      if (leavingLayoutIds.length > 0) {
+        ctx.document.updateNodes(leavingLayoutIds, (node) => (node.layout ? {} : { layoutItem: undefined }), {
+          groupId,
+          label
+        });
+        if (unmovedLayoutIds.length > 0 && (moved.x !== 0 || moved.y !== 0)) {
+          ctx.document.moveEntities({ nodeIds: unmovedLayoutIds }, moved, { groupId, label });
+        }
+      }
       return;
     }
     // 加入布局树：改挂并补上成员标记，与本次移动同组撤销
@@ -336,6 +482,7 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   private finish(pointerId: number): void {
+    this.releaseHeldMembers();
     const { host } = this.ctx;
     host.overlay.clear(MARQUEE_SESSION);
     host.overlay.clear(DROP_TARGET_SESSION);
@@ -343,5 +490,11 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
     host.releasePointer(pointerId);
     host.setCursor('default');
     this.gesture = null;
+  }
+
+  /** 释放拖拽中托管的堆叠成员并归位到槽位：与本次拖拽同组撤销；松手、取消、只读切换与卸载都经此收尾 */
+  private releaseHeldMembers(): void {
+    const groupId = this.gesture?.kind === 'press' ? this.gesture.groupId : undefined;
+    this.ctx.document.releaseLayoutMembers({ groupId, label: '移动' });
   }
 }

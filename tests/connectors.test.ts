@@ -316,6 +316,28 @@ describe('选中与编辑连线', () => {
 });
 
 describe('快速连接', () => {
+  it('组合不支持同类节点新建，不显示四边连接点或悬停预览，点击原连接点位置不创建内容', () => {
+    const { engine, store, host } = setup();
+    engine.session.setSelection({ nodeIds: ['a'] });
+    expect(host.sessions.has('connector-tool:plus')).toBe(true);
+    const groupId = store.groupNodes(['a', 'b'])!;
+    engine.session.setSelection({ nodeIds: [groupId] });
+    expect(host.sessions.has('connector-tool:plus')).toBe(false);
+    const bounds = engine.getNodeWorldBounds(groupId)!;
+    const point = { x: bounds.right + 22, y: (bounds.top + bounds.bottom) / 2 };
+    const before = structuredClone(store.getView().content);
+    store.clearHistory();
+    pointer(engine, 'move', point);
+    expect(host.sessions.has('connector-tool:plus')).toBe(false);
+    expect(() => {
+      pointer(engine, 'down', point);
+      pointer(engine, 'up', point);
+    }).not.toThrow();
+    expect(store.getView().content).toEqual(before);
+    expect(store.canUndo).toBe(false);
+    engine.destroy();
+  });
+
   it('选中单个节点时四边出现「+」；单击右侧「+」在右边新建同类节点并连线，一步撤销', () => {
     const { engine, store, host } = setup();
     store.updateNode('a', { style: { fill: '$red' } });

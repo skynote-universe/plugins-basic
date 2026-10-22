@@ -149,3 +149,61 @@ describe('画框标题', () => {
     expect(store.getNode('F')!.textBlocks![0].runs[0].text).toBe('画框');
   });
 });
+
+describe('画框体验增强 (ADR-145 阶段二)', () => {
+  it('新建画框时自动收纳完全落入外框内的同层节点，保持世界坐标不变，一步撤销整体还原', () => {
+    const { engine, store } = setup();
+    // a 在 (0, 0) 160x100，再建一个 s2 在 (180, 20) 80x60，以及超出范围的 out 在 (350, 0) 100x100
+    store.createNode({ nodeType: 'shape', id: 's2', x: 180, y: 20, width: 80, height: 60 });
+    store.createNode({ nodeType: 'shape', id: 'out', x: 350, y: 0, width: 100, height: 100 });
+    store.clearHistory();
+
+    const beforeA = engine.getNodeWorldBounds('a')!;
+    const beforeS2 = engine.getNodeWorldBounds('s2')!;
+
+    // 在 (-20, -20) 创建 320x200 的画框 wrapFrame，正好完全包裹 a 与 s2，但不完全包含 out
+    const frameId = store.createNode({
+      nodeType: 'frame',
+      id: 'wrapFrame',
+      x: -20,
+      y: -20,
+      width: 320,
+      height: 200
+    });
+    expect(frameId).toBe('wrapFrame');
+    expect(store.getNode('a')?.parentId).toBe('wrapFrame');
+    expect(store.getNode('s2')?.parentId).toBe('wrapFrame');
+    expect(store.getNode('out')?.parentId).toBeUndefined();
+    expect(engine.getNodeWorldBounds('a')).toEqual(beforeA);
+    expect(engine.getNodeWorldBounds('s2')).toEqual(beforeS2);
+
+    // 一步撤销同时移除画框并恢复 a、s2 为根层级节点
+    store.undo();
+    expect(store.getNode('wrapFrame')).toBeUndefined();
+    expect(store.getNode('a')?.parentId).toBeUndefined();
+    expect(store.getNode('s2')?.parentId).toBeUndefined();
+    expect(store.getNode('a')).toMatchObject({ x: 0, y: 0 });
+    expect(store.getNode('s2')).toMatchObject({ x: 180, y: 20 });
+  });
+
+  it('画框 fitContent 按 24px 内边距紧缩包裹子节点并保持子节点世界坐标不变，ungroupNodes 解散画框外壳', () => {
+    const { engine, store } = setup();
+    // F 在 (500, 0) 300x200，内部子节点 c 在局部 (20, 20) 60x40 (世界 520, 20)
+    const beforeC = engine.getNodeWorldBounds('c')!;
+    expect(store.canFitContent('F')).toBe(true);
+
+    store.fitContent(['F']);
+    // 紧缩后：c 的局部坐标变为 (24, 24)，F 尺寸变为 60 + 48 = 108, 40 + 48 = 88，F 世界位置变为 (520 - 24, 20 - 24) = (496, -4)
+    expect(store.getNode('F')).toMatchObject({ x: 496, y: -4, width: 108, height: 88 });
+    expect(store.getNode('c')).toMatchObject({ x: 24, y: 24 });
+    expect(engine.getNodeWorldBounds('c')).toEqual(beforeC);
+    expect(store.canFitContent('F')).toBe(false);
+
+    // 解散画框外壳：释放 c 到根层级并保持世界坐标 (520, 20)，删除 F
+    const released = store.ungroupNodes(['F']);
+    expect(released).toEqual(['c']);
+    expect(store.getNode('F')).toBeUndefined();
+    expect(store.getNode('c')?.parentId).toBeUndefined();
+    expect(engine.getNodeWorldBounds('c')).toEqual(beforeC);
+  });
+});

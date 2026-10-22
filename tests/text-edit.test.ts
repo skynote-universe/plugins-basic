@@ -27,6 +27,7 @@ import {
   TransformPlugin,
   ViewportNavigationPlugin
 } from '../src';
+import { FrameNodeType } from '../src/nodes/frame/content';
 
 /** 每个码点宽 = 字号 × 0.5：自由文本 18px 每字宽 9，行高 25.2 */
 const fonts: FontMeasurer = { measureWidth: (text, font) => [...text].length * font.size * 0.5 };
@@ -706,7 +707,24 @@ describe('段落对齐与格式目标', () => {
     expect(engine.session.textEditing).toMatchObject({ kind: 'node', id: 'f2', blockId: 'title' });
   });
 
-  it('画框标题是纯文本插槽：未编辑时不作为格式目标，编辑时也没有格式可设，粘贴只取纯文本、换行替换为空格', () => {
+  it('扩展声明的纯文本单行插槽仍拒绝格式与富文本，并清除换行', () => {
+    const { engine, store, plugin, host } = setup();
+    class PlainTitleFrame extends FrameNodeType {
+      override readonly slots = [{ slot: 'title', plainText: true, singleLine: true }];
+    }
+    engine.nodeTypes.register(new PlainTitleFrame());
+    store.createNode({ nodeType: 'frame', id: 'plain', x: 50, y: 50, options: { title: 'Plain' } });
+    engine.session.setSelection({ nodeIds: ['plain'] });
+    expect(plugin.formatState).toBeNull();
+    press(engine, { x: 70, y: 35 }, 2);
+    expect(engine.session.textEditing?.id).toBe('plain');
+    expect(plugin.formatState).toBeNull();
+    key(engine, 'a', { ctrlKey: true });
+    host.handler!.paste({ text: 'A\nB', richText: JSON.stringify([{ text: 'A\nB', fontWeight: 'bold' }]) });
+    expect(store.getNode('plain')!.textBlocks![0].runs).toEqual([{ text: 'A B' }]);
+  });
+
+  it('画框标题支持格式设置与富文本粘贴，仍将换行替换为空格', () => {
     const { engine, store, plugin, host } = setup();
     store.createNode({
       id: 'f3',
@@ -719,17 +737,19 @@ describe('段落对齐与格式目标', () => {
     });
 
     engine.session.setSelection({ nodeIds: ['f3'] });
-    expect(plugin.formatState).toBeNull();
+    expect(plugin.formatState).not.toBeNull();
 
     const titlePoint: Point = { x: 70, y: 35 };
     press(engine, titlePoint, 1);
     press(engine, titlePoint, 2);
     expect(engine.session.textEditing).toMatchObject({ kind: 'node', id: 'f3', blockId: 'title' });
-    expect(plugin.formatState).toBeNull();
+    expect(plugin.formatState).not.toBeNull();
+    key(engine, 'a', { ctrlKey: true });
     plugin.applyStyle({ color: '$red' });
+    expect(store.getNode('f3')!.textBlocks![0].runs.some((run) => run.color === '$red')).toBe(true);
 
     key(engine, 'a', { ctrlKey: true });
-    host.handler!.paste({ text: 'A\nB', richText: JSON.stringify([{ text: 'A\nB', fontWeight: 'bold' }]) });
-    expect(store.getNode('f3')!.textBlocks![0].runs).toEqual([{ text: 'A B' }]);
+    host.handler!.paste({ text: 'A\r\nB', richText: JSON.stringify([{ text: 'A\r\nB', fontWeight: 'bold' }]) });
+    expect(store.getNode('f3')!.textBlocks![0].runs).toEqual([{ text: 'A B', fontWeight: 'bold' }]);
   });
 });

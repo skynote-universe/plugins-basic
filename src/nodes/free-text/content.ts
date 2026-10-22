@@ -14,6 +14,7 @@
 import {
   createTextBlockPrimitive,
   resolveTextBlockStyle,
+  scaleNodeTextBlocks,
   type CanvasPrimitive,
   type NodeCreateContent,
   type NodeEntity,
@@ -27,8 +28,6 @@ import {
 
 const BODY_SLOT = 'body';
 const DEFAULT_FONT_SIZE = 18;
-/** 等比缩放后的最小字号 */
-const MIN_FONT_SIZE = 1;
 
 /** 折行时的排版宽度；适应内容时返回 undefined (不折行) */
 function wrapWidth(node: NodeEntity, block: TextBlock): number | undefined {
@@ -102,19 +101,18 @@ export class FreeTextNodeType implements NodeTypeDefinition {
       return withBody(node, {
         ...block,
         sizing: block.sizing === 'fixed' ? 'fixed' : 'auto-height',
-        explicitWidth: width
+        explicitWidth: Math.max(1, Math.round(width))
       });
     }
     if (scale === 1 && (handle === 'n' || handle === 's')) {
-      return withBody(node, { ...block, sizing: 'fixed', explicitWidth: width, explicitHeight: height });
+      return withBody(node, {
+        ...block,
+        sizing: 'fixed',
+        explicitWidth: Math.max(1, Math.round(width)),
+        explicitHeight: Math.max(1, Math.round(height))
+      });
     }
-    const fontSize = resolveTextBlockStyle(node, block, this).fontSize ?? DEFAULT_FONT_SIZE;
-    return withBody(node, {
-      ...block,
-      style: { ...block.style, fontSize: Math.max(MIN_FONT_SIZE, Math.round(fontSize * scale * 100) / 100) },
-      ...(block.explicitWidth !== undefined && { explicitWidth: block.explicitWidth * scale }),
-      ...(block.explicitHeight !== undefined && { explicitHeight: block.explicitHeight * scale })
-    });
+    return { textBlocks: scaleNodeTextBlocks(node, this, scale) };
   }
 
   /** 回到适应内容 (单行)：只切换尺寸状态，外框交给排版派生 */

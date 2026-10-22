@@ -243,7 +243,10 @@ export function collectSnapTargets(ctx: CanvasPluginContext, movingIds: readonly
       continue;
     siblings.push(spatial.getBounds(id)!);
   }
-  return new SnapTargets(siblings, parentId === undefined ? undefined : spatial.getBounds(parentId));
+  const parentNode = parentId === undefined ? undefined : entities.getNode(parentId)?.entity;
+  const containerBounds =
+    parentNode && ctx.nodeTypes.get(parentNode.nodeType)?.acceptsChildren ? spatial.getBounds(parentId!) : undefined;
+  return new SnapTargets(siblings, containerBounds);
 }
 
 /** 画出参考线；guides 为 null 或没有任何参考线时清除 */

@@ -17,14 +17,17 @@
 
 import { SNAP_THRESHOLD_PX, collectSnapTargets, drawSnapGuides, type SnapTargets } from './snapping';
 import {
+  GROUP_NODE_TYPE,
   applyMatrix,
+  areStructuredValuesEqual,
   clonePlainData,
   computeFrameMatrix,
   computeNodeWorldBounds,
   computeWorldFrame,
   generateId,
   invertMatrix,
-  isAspectLocked,
+  multiplyMatrix,
+  isDerivedConnectorId,
   unionBounds,
   type CanvasPluginContext,
   type CanvasPointerEvent,
@@ -32,6 +35,11 @@ import {
   type DocumentChangeSet,
   type NodeEntity,
   type NodeTransform,
+  type NodeScaleSnapshot,
+  type NodeConnectorTransformSnapshot,
+  type NodeResizePolicy,
+  type LayoutDefinition,
+  type CanvasOperationRecord,
   type Point,
   type PointerHooks,
   type RectBounds,
@@ -76,33 +84,58 @@ const HANDLE_SIGNS: Record<ResizeHandle, { x: -1 | 0 | 1; y: -1 | 0 | 1 }> = {
   w: { x: -1, y: 0 }
 };
 
+interface DefinitionDependencies {
+  readonly nodeTypes: ReadonlySet<string>;
+  readonly layouts: ReadonlyMap<string, LayoutDefinition | undefined>;
+  readonly ancestors: ReadonlyMap<string, Readonly<Pick<NodeEntity, 'parentId' | 'layout' | 'layoutItem'>>>;
+}
+
 /** 当前选区的变换外框 */
 interface SelectionFrame {
   readonly frame: WorldFrame;
-  /** 比例锁定：拖边、拖角都按等比缩放 */
-  readonly lockAspect: boolean;
-  /** 拖角时等比缩放内容 (单选且节点类型声明时) */
+  /** 拖角时等比缩放内容 (单选且节点类型声明时，或组合内含此类节点时) */
   readonly scaleContentOnCorners: boolean;
-  /** 可调整的尺寸方向：只能调一轴时不出现另一轴的边控制柄，拖角只改可调的一轴 (单选且节点类型声明时) */
-  readonly resize: NodeResizeAxes;
+  readonly handlePolicies: ReadonlyMap<ResizeHandle, Pick<NodeResizePolicy, 'axes' | 'lockAspect'>>;
+  readonly resizeDependencies: ReadonlySet<string>;
+  readonly groupRoots: ReadonlySet<string>;
+  readonly definitions: DefinitionDependencies;
   /** 可旋转：含布局成员时不可 (成员的朝向由布局决定) */
   readonly rotatable: boolean;
-  /** 参与变换的节点 (最顶层、未锁定)，及其开始时的快照与世界外框 */
+  /** 参与旋转的节点 (最顶层、未锁定)，及其开始时的快照与世界外框 */
   readonly targets: readonly { node: NodeEntity; frame: WorldFrame }[];
+  /** 参与缩放的节点 (组合展开为其非组合后代)，及其开始时的快照与世界外框 */
+  readonly resizeTargets: readonly { node: NodeEntity; frame: WorldFrame }[];
+  readonly scaleSnapshots?: ReadonlyMap<string, NodeScaleSnapshot>;
+  readonly connectorSnapshot?: NodeConnectorTransformSnapshot;
 }
 
-type Gesture =
+/** 手势只持有实际命中手柄的约束，显示缓存不以任何默认手柄代替其他手柄。 */
+interface ResizeSelectionFrame extends SelectionFrame {
+  readonly lockAspect: boolean;
+  readonly resize: NodeResizeAxes;
+  readonly resizePolicies: ReadonlyMap<string, NodeResizePolicy>;
+}
+
+type Gesture = (
   | {
       kind: 'resize';
       pointerId: number;
       handle: ResizeHandle;
       start: Point;
-      selection: SelectionFrame;
+      selection: ResizeSelectionFrame;
       groupId: string;
       /** 吸附候选；外框旋转时为 null */
       snap: SnapTargets | null;
     }
-  | { kind: 'rotate'; pointerId: number; start: Point; selection: SelectionFrame; groupId: string };
+  | { kind: 'rotate'; pointerId: number; start: Point; selection: SelectionFrame; groupId: string }
+) & {
+  readonly trackedNodes: ReadonlySet<string>;
+  readonly roots: ReadonlySet<string>;
+  readonly trackedConnectors: ReadonlySet<string>;
+  readonly definitions: DefinitionDependencies;
+  hasMoved?: boolean;
+  lastInput?: { x: number; y: number; modifiers: number };
+};
 
 type HandleHit = { kind: 'resize'; handle: ResizeHandle } | { kind: 'rotate' };
 
@@ -118,6 +151,12 @@ function rotatePoint(point: Point, center: Point, degrees: number): Point {
   const dx = point.x - center.x;
   const dy = point.y - center.y;
   return { x: center.x + dx * cos - dy * sin, y: center.y + dx * sin + dy * cos };
+}
+
+/** 边只能调整其法线方向，角需要两个轴都可调。 */
+function canResizeHandle(axes: NodeResizeAxes, handle: ResizeHandle): boolean {
+  const sign = HANDLE_SIGNS[handle];
+  return axes === 'both' || (axes === 'width' && sign.y === 0) || (axes === 'height' && sign.x === 0);
 }
 
 export class TransformPlugin implements SkyNotePlugin, PointerHooks {
@@ -137,11 +176,16 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     this.ctx = ctx;
     ctx.registerPointerHooks(this, TRANSFORM_PRIORITY);
     ctx.onSessionChange((change) => this.onSessionChange(change));
-    ctx.onDocumentChange((changes) => this.onDocumentChange(changes));
+    ctx.onDocumentChange((changes, record) => this.onDocumentChange(changes, record));
+    ctx.nodeTypes.onChange((type) => this.onNodeTypeChange(type));
+    ctx.layouts.onChange(() => this.onLayoutsChange());
+    this.redraw();
   }
 
   unmount(): void {
-    this.gesture = null;
+    if (this.gesture) this.finish(this.gesture.pointerId);
+    else if (this.hoverCursorSet) this.ctx.host.setCursor('default');
+    this.hoverCursorSet = false;
     this.selectionCache = undefined;
   }
 
@@ -150,19 +194,117 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     const selection = this.selection;
     const hit = selection && this.hitHandle(selection, e.point);
     if (!selection || !hit) return;
+    // 实体会被字段级补丁就地修改，快照必须深拷贝，否则每帧都在上一帧的结果上叠加 (如字号越拖越大)
+    const resizing = hit.kind === 'resize';
+    const policy = resizing
+      ? this.resolveSelectionResizePolicy(
+          selection.targets,
+          selection.frame.rotation,
+          hit.handle,
+          selection.targets.length === 1
+        )
+      : undefined;
+    // 显示缓存不承担授权；捕获指针前再次校验当前手柄，失效策略不能进入手势快照。
+    if (hit.kind === 'resize' && policy && !canResizeHandle(policy.axes, hit.handle)) {
+      this.selectionCache = undefined;
+      this.redraw();
+      return;
+    }
     e.claimPointer(TRANSFORM_PLUGIN_ID);
     this.ctx.host.capturePointer(e.pointerId);
-    // 实体会被字段级补丁就地修改，快照必须深拷贝，否则每帧都在上一帧的结果上叠加 (如字号越拖越大)
-    const snapshot: SelectionFrame = {
+    let snapshot: SelectionFrame = {
       ...selection,
-      targets: selection.targets.map(({ node, frame }) => ({ node: clonePlainData(node), frame }))
+      targets: selection.targets.map(({ node, frame }) => ({ node: resizing ? clonePlainData(node) : node, frame })),
+      scaleSnapshots: new Map(
+        selection.targets
+          .filter(
+            ({ node }) =>
+              resizing &&
+              (node.nodeType === GROUP_NODE_TYPE || this.ctx.nodeTypes.get(node.nodeType)?.supportsContentScale)
+          )
+          .map(({ node }) => {
+            const boundsOnly =
+              policy?.nodes.get(node.id)?.behavior === 'resize-bounds' && node.nodeType !== GROUP_NODE_TYPE;
+            const ids = [
+              node.id,
+              ...(boundsOnly ? this.ctx.entities.getChildIds(node.id) : this.ctx.entities.collectDescendantIds(node.id))
+            ];
+            const inside = new Set(ids);
+            const connectorIds = new Set(
+              boundsOnly ? [] : ids.flatMap((id) => [...this.ctx.entities.getConnectorIdsOfNode(id)])
+            );
+            return [
+              node.id,
+              {
+                nodes: new Map(
+                  ids.map((id) => {
+                    const entity = this.ctx.entities.getNode(id)!.entity;
+                    return [
+                      id,
+                      {
+                        node: boundsOnly ? { ...entity } : clonePlainData(entity),
+                        frame: computeWorldFrame(entity, this.ctx.entities.getWorldTransform(id)!)
+                      }
+                    ];
+                  })
+                ),
+                connectors: new Map(
+                  (boundsOnly ? [] : [...connectorIds])
+                    .filter((id) => !isDerivedConnectorId(id))
+                    .map((id) => this.ctx.document.getConnector(id))
+                    .filter(
+                      (connector) =>
+                        connector !== undefined &&
+                        inside.has(connector.from.nodeId!) &&
+                        inside.has(connector.to.nodeId!)
+                    )
+                    .map((connector) => [connector!.id, clonePlainData(connector!)])
+                )
+              }
+            ];
+          })
+      )
     };
-    const base = { pointerId: e.pointerId, start: e.point, selection: snapshot, groupId: generateId('transform') };
+    const roots = new Set(selection.targets.map(({ node }) => node.id));
+    if (!resizing) {
+      snapshot = {
+        ...snapshot,
+        connectorSnapshot: this.ctx.document.captureConnectorTransformSnapshot(roots, selection.frame)
+      };
+    }
+    const trackedNodes = new Set(roots);
+    const trackedConnectors = new Set<string>();
+    for (const scope of snapshot.scaleSnapshots!.values()) {
+      for (const id of scope.nodes.keys()) trackedNodes.add(id);
+      for (const id of scope.connectors.keys()) trackedConnectors.add(id);
+    }
+    if (snapshot.connectorSnapshot) {
+      for (const id of snapshot.connectorSnapshot.nodeIds) trackedNodes.add(id);
+      for (const id of snapshot.connectorSnapshot.controlPoints.keys()) trackedConnectors.add(id);
+    }
+    const definitionNodes = new Set(selection.resizeDependencies);
+    for (const id of trackedNodes) definitionNodes.add(id);
+    const base = {
+      pointerId: e.pointerId,
+      start: e.point,
+      selection: snapshot,
+      groupId: generateId('transform'),
+      roots,
+      trackedNodes,
+      trackedConnectors,
+      definitions: this.resolveDefinitionDependencies(definitionNodes, roots)
+    };
     this.gesture =
       hit.kind === 'resize'
         ? {
             ...base,
             ...hit,
+            selection: {
+              ...snapshot,
+              lockAspect: policy!.lockAspect,
+              resize: policy!.axes,
+              resizePolicies: policy!.nodes
+            },
             snap:
               selection.frame.rotation % 360 === 0
                 ? collectSnapTargets(
@@ -181,6 +323,22 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
       return;
     }
     if (gesture.pointerId !== e.pointerId) return;
+    // 首次同点输入不调用缩放 hook；与可因视口变化失效的重复输入缓存独立。
+    if (!gesture.hasMoved) {
+      if (e.point.x === gesture.start.x && e.point.y === gesture.start.y) return;
+      gesture.hasMoved = true;
+    }
+    const modifiers =
+      Number(e.modifiers.shift) |
+      (Number(e.modifiers.alt) << 1) |
+      (Number(e.modifiers.ctrl) << 2) |
+      (Number(e.modifiers.meta) << 3);
+    if (
+      gesture.lastInput?.x === e.point.x &&
+      gesture.lastInput.y === e.point.y &&
+      gesture.lastInput.modifiers === modifiers
+    )
+      return;
     let transforms: NodeTransform[];
     if (gesture.kind === 'resize') {
       const snap = e.modifiers.ctrl || e.modifiers.meta ? null : gesture.snap;
@@ -194,6 +352,8 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
       groupId: gesture.groupId,
       label: gesture.kind === 'resize' ? '缩放节点' : '旋转节点'
     });
+    if (this.gesture !== gesture) return;
+    gesture.lastInput = { x: e.point.x, y: e.point.y, modifiers };
     // 旋转中光标跟随指针转动 (旋转中心即手势开始时的外框中心)
     if (gesture.kind === 'rotate') {
       const { cx, cy } = gesture.selection.frame;
@@ -213,6 +373,7 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     drawSnapGuides(this.ctx, null);
     this.ctx.host.releasePointer(pointerId);
     this.ctx.host.setCursor('default');
+    this.hoverCursorSet = false;
     this.gesture = null;
   }
 
@@ -230,24 +391,68 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     if (session.textEditing) return null;
     const selected = session.selectedNodeIds;
     const targets: { node: NodeEntity; frame: WorldFrame }[] = [];
+    const resizeTargets: { node: NodeEntity; frame: WorldFrame }[] = [];
+    const resizeDependencies = new Set<string>();
+    const groupRoots = new Set<string>();
+    const coveredAncestors = new Map<string, boolean>();
     for (const id of selected) {
       const runtime = entities.getNode(id);
-      // 后代随容器变换，只取最顶层的选中节点
-      if (!runtime || runtime.entity.locked || entities.getAncestorIds(id).some((a) => selected.has(a))) continue;
-      targets.push({ node: runtime.entity, frame: computeWorldFrame(runtime.entity, entities.getWorldTransform(id)!) });
+      if (!runtime || runtime.entity.locked) continue;
+      // 只取最顶层目标；共享父链缓存“自身或祖先已选中”，避免逐目标构造完整祖先数组。
+      const path: string[] = [];
+      let parentId = runtime.entity.parentId;
+      let covered = false;
+      while (parentId !== undefined) {
+        const cached = coveredAncestors.get(parentId);
+        if (cached !== undefined) {
+          covered = cached;
+          break;
+        }
+        const parent = entities.getNode(parentId);
+        if (!parent) break;
+        path.push(parentId);
+        if (selected.has(parentId)) {
+          covered = true;
+          break;
+        }
+        parentId = parent.entity.parentId;
+      }
+      for (const ancestorId of path) coveredAncestors.set(ancestorId, covered);
+      if (covered) continue;
+      const item = { node: runtime.entity, frame: computeWorldFrame(runtime.entity, entities.getWorldTransform(id)!) };
+      targets.push(item);
+      resizeDependencies.add(id);
+      if (runtime.entity.nodeType === GROUP_NODE_TYPE) {
+        groupRoots.add(id);
+        this.collectGroupResizeTargets(id, resizeTargets, resizeDependencies);
+      } else {
+        resizeTargets.push(item);
+      }
     }
     if (targets.length === 0) return null;
+    const definitions = this.resolveDefinitionDependencies(
+      resizeDependencies,
+      targets.map(({ node }) => node.id)
+    );
 
     if (targets.length === 1) {
       const [{ node, frame }] = targets;
       const definition = nodeTypes.get(node.nodeType);
+      const isGroup = node.nodeType === GROUP_NODE_TYPE;
+      const handlePolicies = this.resolveHandlePolicies(targets, frame.rotation);
+      const scaleContentOnCorners =
+        (definition?.scaleContentOnCorners ?? false) ||
+        (isGroup && resizeTargets.some(({ node: child }) => nodeTypes.get(child.nodeType)?.scaleContentOnCorners));
       return {
         frame,
-        lockAspect: isAspectLocked(node, definition),
-        scaleContentOnCorners: definition?.scaleContentOnCorners ?? false,
-        resize: definition?.resize ?? 'both',
+        scaleContentOnCorners,
+        handlePolicies,
+        resizeDependencies,
+        groupRoots,
+        definitions,
         rotatable: !isInstalledLayoutMember(this.ctx, node.id),
-        targets
+        targets,
+        resizeTargets: resizeTargets.length > 0 ? resizeTargets : targets
       };
     }
 
@@ -258,9 +463,8 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
         computeNodeWorldBounds(targets[i].node, entities.getWorldTransform(targets[i].node.id)!)
       );
     }
-    const lockAspect = targets.some(
-      ({ node, frame }) => frame.rotation % 360 !== 0 || isAspectLocked(node, nodeTypes.get(node.nodeType))
-    );
+    const effectiveResizeTargets = resizeTargets.length > 0 ? resizeTargets : targets;
+    const handlePolicies = this.resolveHandlePolicies(targets, 0);
     return {
       frame: {
         cx: (bounds.left + bounds.right) / 2,
@@ -269,12 +473,190 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
         height: bounds.bottom - bounds.top,
         rotation: 0
       },
-      lockAspect,
       scaleContentOnCorners: false,
-      resize: 'both',
+      handlePolicies,
+      resizeDependencies,
+      groupRoots,
+      definitions,
       rotatable: !targets.some(({ node }) => isInstalledLayoutMember(this.ctx, node.id)),
-      targets
+      targets,
+      resizeTargets: effectiveResizeTargets
     };
+  }
+
+  private resolveDefinitionDependencies(nodeIds: Iterable<string>, roots: Iterable<string>): DefinitionDependencies {
+    const nodeTypes = new Set<string>();
+    const layouts = new Map<string, LayoutDefinition | undefined>();
+    for (const id of nodeIds) {
+      const node = this.ctx.document.getNode(id);
+      if (!node) continue;
+      nodeTypes.add(node.nodeType);
+      if (node.layout) layouts.set(node.layout.type, this.ctx.layouts.get(node.layout.type));
+    }
+    // 共享祖先只访问一次；布局晚注册或卸载可能改变成员旋转约束，却没有任何文档补丁。
+    const ancestors = new Map<string, Readonly<Pick<NodeEntity, 'parentId' | 'layout' | 'layoutItem'>>>();
+    for (const id of roots) {
+      let parentId = this.ctx.document.getNode(id)?.parentId;
+      while (parentId !== undefined && !ancestors.has(parentId)) {
+        const parent = this.ctx.document.getNode(parentId);
+        if (!parent) break;
+        // 字段级补丁可就地修改嵌套配置，只保留布局语义的独立快照，不复制祖先文本或其他内容。
+        ancestors.set(
+          parentId,
+          clonePlainData({ parentId: parent.parentId, layout: parent.layout, layoutItem: parent.layoutItem })
+        );
+        if (parent.layout) layouts.set(parent.layout.type, this.ctx.layouts.get(parent.layout.type));
+        parentId = parent.parentId;
+      }
+    }
+    return { nodeTypes, layouts, ancestors };
+  }
+
+  private ancestorLayoutChanged(dependencies: DefinitionDependencies, changes: DocumentChangeSet): boolean {
+    if (dependencies.ancestors.size === 0) return false;
+    for (const ids of [changes.nodes.data, changes.nodes.reparented, changes.nodes.removed]) {
+      for (const id of ids) {
+        const previous = dependencies.ancestors.get(id);
+        if (!previous) continue;
+        const node = this.ctx.document.getNode(id);
+        if (
+          !node ||
+          previous.parentId !== node.parentId ||
+          !areStructuredValuesEqual(previous.layout, node.layout) ||
+          !areStructuredValuesEqual(previous.layoutItem, node.layoutItem)
+        )
+          return true;
+      }
+    }
+    return false;
+  }
+
+  private onNodeTypeChange(type: string): void {
+    const gestureAffected = this.gesture?.definitions.nodeTypes.has(type);
+    const selectionAffected = this.selectionCache?.definitions.nodeTypes.has(type);
+    if (gestureAffected && this.gesture) this.finish(this.gesture.pointerId);
+    if (gestureAffected || selectionAffected) {
+      this.selectionCache = undefined;
+      this.redraw();
+    }
+  }
+
+  private onLayoutsChange(): void {
+    const changed = (dependencies: DefinitionDependencies | undefined): boolean => {
+      if (dependencies)
+        for (const [type, definition] of dependencies.layouts) {
+          if (this.ctx.layouts.get(type) !== definition) return true;
+        }
+      return false;
+    };
+    const gestureAffected = changed(this.gesture?.definitions);
+    const selectionAffected = changed(this.selectionCache?.definitions);
+    if (gestureAffected && this.gesture) this.finish(this.gesture.pointerId);
+    if (gestureAffected || selectionAffected) {
+      this.selectionCache = undefined;
+      this.redraw();
+    }
+  }
+
+  private resolveHandlePolicies(
+    targets: readonly { node: NodeEntity; frame: WorldFrame }[],
+    rotation: number
+  ): ReadonlyMap<ResizeHandle, Pick<NodeResizePolicy, 'axes' | 'lockAspect'>> {
+    if (targets.length === 1) {
+      const [{ node }] = targets;
+      const varying = node.nodeType !== GROUP_NODE_TYPE && this.ctx.nodeTypes.get(node.nodeType)?.getResizeBehavior;
+      const common = varying ? undefined : this.ctx.document.getNodeResizePolicy(node.id);
+      return new Map(
+        ALL_HANDLES.map((handle) => {
+          const policy = common ?? this.ctx.document.getNodeResizePolicy(node.id, 'pointer', handle);
+          return [handle, { axes: policy.axes, lockAspect: policy.lockAspect }];
+        })
+      );
+    }
+    const common: (typeof targets)[number][] = [];
+    const varying: (typeof targets)[number][] = [];
+    for (const target of targets) {
+      // Group 的行为固定；其成员约束只查询一次，不能因八个手柄重复展开后代。
+      const perHandle =
+        target.node.nodeType !== GROUP_NODE_TYPE && this.ctx.nodeTypes.get(target.node.nodeType)?.getResizeBehavior;
+      (perHandle ? varying : common).push(target);
+    }
+    const base = this.resolveSelectionResizePolicy(common, rotation, 'se');
+    const commonPolicy = { axes: base.axes, lockAspect: base.lockAspect };
+    const policies = new Map<ResizeHandle, Pick<NodeResizePolicy, 'axes' | 'lockAspect'>>();
+    for (const handle of ALL_HANDLES) {
+      if (varying.length === 0) {
+        policies.set(handle, commonPolicy);
+        continue;
+      }
+      const next = this.resolveSelectionResizePolicy(varying, rotation, handle);
+      const width = (base.axes === 'both' || base.axes === 'width') && (next.axes === 'both' || next.axes === 'width');
+      const height =
+        (base.axes === 'both' || base.axes === 'height') && (next.axes === 'both' || next.axes === 'height');
+      const lockAspect = base.lockAspect || next.lockAspect;
+      const axes =
+        lockAspect && (!width || !height) ? 'none' : width ? (height ? 'both' : 'width') : height ? 'height' : 'none';
+      policies.set(handle, { axes, lockAspect });
+    }
+    return policies;
+  }
+
+  /** 多选和组合取成员可调轴的交集；旋转或等比约束无法保持受限轴时不提供整体缩放。 */
+  private resolveSelectionResizePolicy(
+    targets: readonly { node: NodeEntity; frame: WorldFrame }[],
+    rotation: number,
+    handle: ResizeHandle,
+    singleSelection = false
+  ): { nodes: ReadonlyMap<string, NodeResizePolicy>; axes: NodeResizeAxes; lockAspect: boolean } {
+    const nodes = new Map<string, NodeResizePolicy>();
+    // 单选直接遵守节点策略；可调单轴优先于比例锁定，多选才需要合并集合约束。
+    if (singleSelection) {
+      const id = targets[0].node.id;
+      const policy = this.ctx.document.getNodeResizePolicy(id, 'pointer', handle);
+      nodes.set(id, policy);
+      return { nodes, axes: policy.axes, lockAspect: policy.lockAspect };
+    }
+    let lockAspect = false;
+    let width = true;
+    let height = true;
+    for (const { node, frame } of targets) {
+      const policy = this.ctx.document.getNodeResizePolicy(node.id, 'pointer', handle);
+      nodes.set(node.id, policy);
+      const axes = policy.axes;
+      lockAspect ||= policy.lockAspect || Math.abs((frame.rotation - rotation) % 360) > 1e-4;
+      if (axes !== 'both' && Math.abs((frame.rotation - rotation) % 180) > 1e-4) {
+        width = false;
+        height = false;
+      }
+      width &&= axes === 'both' || axes === 'width';
+      height &&= axes === 'both' || axes === 'height';
+    }
+    const axes =
+      lockAspect && (!width || !height) ? 'none' : width ? (height ? 'both' : 'width') : height ? 'height' : 'none';
+    return { nodes, axes, lockAspect };
+  }
+
+  /** 非组合容器作为整体缩放叶子；迭代收集依赖，避免组合深度占用调用栈。 */
+  private collectGroupResizeTargets(
+    groupId: string,
+    out: { node: NodeEntity; frame: WorldFrame }[],
+    dependencies: Set<string>
+  ): void {
+    const { entities } = this.ctx;
+    const groups = [groupId];
+    for (let i = 0; i < groups.length; i++) {
+      for (const childId of entities.getChildIds(groups[i])) {
+        dependencies.add(childId);
+        const childRuntime = entities.getNode(childId);
+        if (!childRuntime || childRuntime.entity.locked) continue;
+        const child = childRuntime.entity;
+        if (child.nodeType === GROUP_NODE_TYPE) {
+          groups.push(child.id);
+        } else {
+          out.push({ node: child, frame: computeWorldFrame(child, entities.getWorldTransform(child.id)!) });
+        }
+      }
+    }
   }
 
   /** 控制柄在外框局部坐标中的位置 */
@@ -288,12 +670,13 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
    * 否则屏幕上过窄的外框只保留角控制柄，避免边控制柄与角重叠而无法拖动
    */
   private visibleHandles(selection: SelectionFrame): readonly ResizeHandle[] {
-    if (selection.resize === 'width') return ['e', 'w'];
-    if (selection.resize === 'height') return ['n', 's'];
     const zoom = this.ctx.session.viewport.zoom;
     const narrow = selection.frame.width * zoom < HANDLE_SIZE_PX * 3;
     const short = selection.frame.height * zoom < HANDLE_SIZE_PX * 3;
-    return ALL_HANDLES.filter((handle) => {
+    const handles = ALL_HANDLES.filter((handle) => canResizeHandle(selection.handlePolicies.get(handle)!.axes, handle));
+    const hasCorners = handles.some((handle) => CORNERS.includes(handle));
+    return handles.filter((handle) => {
+      if (!hasCorners || selection.handlePolicies.get(handle)!.axes !== 'both') return true;
       const sign = HANDLE_SIGNS[handle];
       return !((sign.x === 0 && narrow) || (sign.y === 0 && short));
     });
@@ -348,7 +731,7 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
    * @returns 各节点的变换与新外框的世界范围 (外框旋转时该范围无意义，只在吸附时使用)
    */
   private computeResize(
-    selection: SelectionFrame,
+    selection: ResizeSelectionFrame,
     handle: ResizeHandle,
     start: Point,
     e: CanvasPointerEvent,
@@ -414,11 +797,11 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     const { nodeTypes } = this.ctx;
     const origin = applyMatrix(fromOld, left, top);
 
+    const single = selection.targets.length === 1;
     const transforms = selection.targets.map(({ node, frame: nodeFrame }) => {
       // 节点中心在旧外框局部坐标中的位置，按两轴比例映射到新外框
       const c = applyMatrix(toLocal, nodeFrame.cx, nodeFrame.cy);
       const center = applyMatrix(fromOld, left + c.x * kx, top + c.y * ky);
-      const single = selection.targets.length === 1;
       const nextFrame: WorldFrame = {
         cx: center.x,
         cy: center.y,
@@ -426,14 +809,29 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
         height: single ? height : nodeFrame.height * ky,
         rotation: nodeFrame.rotation
       };
-      const fields = nodeTypes.get(node.nodeType)?.applyResize?.(node, {
-        // 多选整体等比缩放时，对每个节点而言等同于拖角
-        handle: single || !uniform ? handle : 'se',
-        width: nextFrame.width,
-        height: nextFrame.height,
-        scale: uniform ? scale : 1
-      });
-      return { id: node.id, frame: nextFrame, fields };
+      const definition = nodeTypes.get(node.nodeType);
+      const scaleContents =
+        !!definition?.supportsContentScale && selection.resizePolicies.get(node.id)?.behavior === 'scale-contents';
+      // 整体缩放的字段由内核统一生成（包括回退 hook），交互层不提前重复计算。
+      const fields = !scaleContents
+        ? definition?.applyResize?.(node, {
+            // 多选或组合整体等比缩放时，对每个节点而言等同于拖角
+            handle: single || !uniform ? handle : 'se',
+            width: nextFrame.width,
+            height: nextFrame.height,
+            scale: uniform ? scale : 1
+          })
+        : undefined;
+      return {
+        id: node.id,
+        frame: nextFrame,
+        fields,
+        scaleContents,
+        preserveContents:
+          !!nodeTypes.get(node.nodeType)?.supportsContentScale &&
+          selection.resizePolicies.get(node.id)?.behavior === 'resize-bounds',
+        scaleSnapshot: selection.scaleSnapshots?.get(node.id)
+      };
     });
     return {
       transforms,
@@ -454,11 +852,23 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
         180) /
       Math.PI;
     if (e.modifiers.shift) delta = Math.round((frame.rotation + delta) / ROTATE_SNAP) * ROTATE_SNAP - frame.rotation;
+    delta = Math.round(frame.rotation + delta) - frame.rotation;
+    const connectorTransform = selection.connectorSnapshot && {
+      snapshot: selection.connectorSnapshot,
+      matrix: multiplyMatrix(
+        computeFrameMatrix({ ...frame, rotation: frame.rotation + delta }),
+        invertMatrix(computeFrameMatrix(frame))
+      )
+    };
 
     // 2. [节点外框重定位] 围绕整体外框中心公转并自转每个选中的目标节点
     return selection.targets.map(({ node, frame: nodeFrame }) => {
       const c = rotatePoint({ x: nodeFrame.cx, y: nodeFrame.cy }, center, delta);
-      return { id: node.id, frame: { ...nodeFrame, cx: c.x, cy: c.y, rotation: nodeFrame.rotation + delta } };
+      return {
+        id: node.id,
+        frame: { ...nodeFrame, cx: c.x, cy: c.y, rotation: nodeFrame.rotation + delta },
+        connectorTransform
+      };
     });
   }
 
@@ -496,14 +906,76 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
       return;
     }
     const selectionChanged = change.toggledNodeIds.size > 0 || change.textEditingChanged || change.readOnlyChanged;
+    if (selectionChanged && this.gesture) this.finish(this.gesture.pointerId);
+    if (change.viewportChanged && this.gesture) this.gesture.lastInput = undefined;
     if (selectionChanged) this.selectionCache = undefined;
     // 平移不改变世界坐标中的控制柄，只有缩放 (控制柄屏幕尺寸固定) 需要重画
     const zoomChanged = change.viewportChanged && this.ctx.session.viewport.zoom !== this.drawnZoom;
     if (selectionChanged || zoomChanged || change.themeChanged) this.redraw();
   }
 
-  private onDocumentChange(changes: DocumentChangeSet): void {
-    for (const id of this.ctx.session.selectedNodeIds) {
+  private onDocumentChange(changes: DocumentChangeSet, record: CanvasOperationRecord): void {
+    const gesture = this.gesture;
+    if (gesture && !(record.origin === 'local' && record.groupId === gesture.groupId)) {
+      // 外部事务改变手势作用域时保留已提交结果并结束手势，不用旧快照覆盖远端结构或内容。
+      const related = (id: string): boolean =>
+        gesture.trackedNodes.has(id) ||
+        this.ctx.entities.getAncestorIds(id).some((parent) => gesture.roots.has(parent));
+      const affectsNodes = (ids: ReadonlySet<string>): boolean => {
+        for (const id of ids) if (related(id)) return true;
+        return false;
+      };
+      const affectsConnectors = (ids: ReadonlySet<string>): boolean => {
+        for (const id of ids) {
+          if (gesture.trackedConnectors.has(id)) return true;
+          if (isDerivedConnectorId(id)) continue;
+          const connector = this.ctx.document.getConnector(id);
+          if (
+            connector?.from.nodeId &&
+            connector.to.nodeId &&
+            gesture.trackedNodes.has(connector.from.nodeId) &&
+            gesture.trackedNodes.has(connector.to.nodeId)
+          )
+            return true;
+        }
+        return false;
+      };
+      const interrupted =
+        changes.contentReplaced ||
+        this.ancestorLayoutChanged(gesture.definitions, changes) ||
+        gesture.selection.targets.some(({ node }) => changes.nodes.worldGeometry.has(node.id)) ||
+        affectsNodes(changes.nodes.geometry) ||
+        affectsNodes(changes.nodes.data) ||
+        affectsNodes(changes.nodes.removed) ||
+        affectsConnectors(changes.connectors.geometry) ||
+        affectsConnectors(changes.connectors.data) ||
+        affectsConnectors(changes.connectors.removed);
+      if (interrupted) this.finish(gesture.pointerId);
+    }
+    // 成员几何或结构变化也可能只改变策略；保留旧依赖集合才能识别已删除和移出的成员。
+    const selected = this.ctx.session.selectedNodeIds;
+    const cached = this.selectionCache;
+    if (cached) {
+      if (this.ancestorLayoutChanged(cached.definitions, changes)) {
+        this.selectionCache = undefined;
+        this.redraw();
+        return;
+      }
+      for (const ids of [changes.nodes.geometry, changes.nodes.data, changes.nodes.removed, changes.nodes.reparented]) {
+        for (const id of ids) {
+          if (
+            cached.resizeDependencies.has(id) ||
+            (cached.groupRoots.size > 0 &&
+              this.ctx.entities.getAncestorIds(id).some((parent) => cached.groupRoots.has(parent)))
+          ) {
+            this.selectionCache = undefined;
+            this.redraw();
+            return;
+          }
+        }
+      }
+    }
+    for (const id of selected) {
       if (changes.nodes.worldGeometry.has(id) || changes.nodes.removed.has(id) || changes.nodes.data.has(id)) {
         this.selectionCache = undefined;
         this.redraw();
@@ -546,14 +1018,17 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     // 条形控制柄不超过所在边长度的一半 (缩小视图时外框很矮也不会溢出)
     const along = (side: number) => Math.min(BAR_LENGTH_PX / 2 / viewport.zoom, side / 4);
     const across = BAR_THICKNESS_PX / 2 / viewport.zoom;
-    const handles =
-      selection.resize === 'both'
-        ? CORNERS.map((handle) => ({ handle, hx: half, hy: half }))
-        : this.visibleHandles(selection).map((handle) =>
-            HANDLE_SIGNS[handle].x === 0
-              ? { handle, hx: along(frame.width), hy: across }
-              : { handle, hx: across, hy: along(frame.height) }
-          );
+    const available = this.visibleHandles(selection);
+    const hasCorners = available.some((handle) => CORNERS.includes(handle));
+    const handles = available
+      .filter((handle) => CORNERS.includes(handle) || !hasCorners)
+      .map((handle) =>
+        CORNERS.includes(handle)
+          ? { handle, hx: half, hy: half }
+          : HANDLE_SIGNS[handle].x === 0
+            ? { handle, hx: along(frame.width), hy: across }
+            : { handle, hx: across, hy: along(frame.height) }
+      );
     for (const { handle, hx, hy } of handles) {
       const p = this.handlePosition(frame, handle);
       const square = [

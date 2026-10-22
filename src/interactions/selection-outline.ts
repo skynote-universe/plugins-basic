@@ -25,6 +25,8 @@ import {
   type TextEditingTarget
 } from '@skynote/core';
 
+import { resolveGroupTarget } from './group-selection';
+
 export const SELECTION_OUTLINE_PLUGIN_ID = '@skynote/plugins-basic/selection-outline';
 const OUTLINE_SESSION = 'selection:outline';
 const HOVER_SESSION = 'selection:hover';
@@ -59,7 +61,9 @@ export class SelectionOutlinePlugin implements SkyNotePlugin, PointerHooks {
       this.setHover(null);
       return;
     }
-    const node = this.ctx.hitTestNode(e.point);
+    const raw = this.ctx.hitTestNode(e.point);
+    const targetId = raw ? resolveGroupTarget(this.ctx, raw.id, { deep: e.modifiers.ctrl || e.modifiers.meta }) : null;
+    const node = targetId ? (this.ctx.entities.getNode(targetId)?.entity ?? null) : null;
     this.setHover(node && !this.ctx.session.selectedNodeIds.has(node.id) ? node : null);
   }
 

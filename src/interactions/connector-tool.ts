@@ -12,7 +12,7 @@
  *    选中后经 connectNewNode 在该处新建节点并连上，内核不关心界面长什么样。
  * 6. 快速连接点：平时只是四边的小圆点，不抢画面；悬停时放大成「+」并用虚线预览将要新建的节点与连线
  *    (与单击结果完全一致，含被占位时的错开)。单击在该方向新建同类节点 (同尺寸、样式与数据，不带文字) 并连线，
- *    拖动等于从这条边画线；容器 (画框) 与删空即消失的节点 (自由文本) 不显示。
+ *    拖动等于从这条边画线；不支持新建的节点 (组合)、容器 (画框) 与删空即消失的节点 (自由文本) 不显示。
  */
 
 import {
@@ -374,6 +374,7 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
     const definition = node && ctx.nodeTypes.get(node.nodeType);
     if (
       !node ||
+      !definition?.createContent ||
       node.locked ||
       session.isReadOnly ||
       this.active ||
@@ -498,7 +499,7 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
   private quickConnect(plus: PlusHandle): void {
     const { document, session } = this.ctx;
     const source = document.getNode(plus.nodeId);
-    if (!source) return;
+    if (!source || !this.ctx.nodeTypes.get(source.nodeType)?.createContent) return;
     const { x, y } = this.quickPlacement(source, plus.side);
     const id = document.batch(() => {
       const excludeSystemKeys = new Set([

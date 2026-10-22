@@ -87,6 +87,7 @@ import {
   type VerticalAlign
 } from '@skynote/core';
 import { blockRunStyle, commonStyle, formatPatch, isFormatActive, type TextFormat } from './text-format';
+import { resolveGroupTarget } from './group-selection';
 
 export const TEXT_EDIT_PLUGIN_ID = '@skynote/plugins-basic/text-edit';
 /** 高于变换控制柄 (50)：编辑中按在文字上是定位光标；滚轮高于视口平移 (-100) */
@@ -404,7 +405,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     const entered =
       hit?.kind === 'connector'
         ? !hit.connector.locked && this.enterConnector(hit.connector, e.point)
-        : !!e.target && this.enterNode(e.target, e.point);
+        : !!e.target && resolveGroupTarget(this.ctx, e.target.id) === e.target.id && this.enterNode(e.target, e.point);
     if (entered) e.claimPointer(TEXT_EDIT_PLUGIN_ID);
   }
 
@@ -801,11 +802,14 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       return;
     }
     const [start, end] = this.range(state);
+    const normalized = state.slot?.singleLine
+      ? runs.map((run) => ({ ...run, text: run.text.replace(/\r\n?|\n/g, ' ') }))
+      : runs;
     this.replaceSelection(
       state,
       geometry,
-      replaceRuns(geometry.runs, start, end, runs),
-      start + getRunsText(runs).length
+      replaceRuns(geometry.runs, start, end, normalized),
+      start + getRunsText(normalized).length
     );
   }
 
@@ -975,7 +979,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
         const blockIndex = node.textBlocks?.findIndex((b) => b.id === primitive.id) ?? -1;
         if (blockIndex < 0) continue;
         const block = node.textBlocks![blockIndex];
-        // 纯文本插槽 (如画框标题) 的外观由节点类型固定，不是格式目标
+        // 插件声明为纯文本的插槽由节点类型固定外观，不作为格式目标。
         if (findTextSlot(block, definition)?.plainText) continue;
         blocks.push({
           kind: 'node',

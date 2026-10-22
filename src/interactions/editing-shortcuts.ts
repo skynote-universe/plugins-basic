@@ -21,6 +21,7 @@ import {
   type LayerMove,
   type SkyNotePlugin
 } from '@skynote/core';
+import { resolveParentGroupId } from './group-selection';
 
 export const EDITING_SHORTCUTS_PLUGIN_ID = '@skynote/plugins-basic/editing-shortcuts';
 /** 方向键微移的世界距离：普通 1，按住 Shift 为 10 */
@@ -62,6 +63,18 @@ export class EditingShortcutsPlugin implements SkyNotePlugin {
         nodeIds: entities.getChildIds(undefined),
         connectorIds: entities.getAllConnectors().map((runtime) => runtime.entity.id)
       });
+    } else if (mod && e.code === 'KeyG') {
+      const ids = this.editableSelection();
+      if (ids.length === 0) return false;
+      if (e.shiftKey) {
+        const released = document.ungroupNodes(ids);
+        if (released.length === 0) return false;
+        session.setSelection({ nodeIds: released, connectorIds: [] });
+      } else {
+        const groupId = document.groupNodes(ids);
+        if (!groupId) return false;
+        session.setSelection({ nodeIds: [groupId], connectorIds: [] });
+      }
     } else if (mod && !e.shiftKey && e.code === 'KeyD') {
       const refs = this.editableEntities();
       if (refs.nodeIds.length + refs.connectorIds.length === 0) return false;
@@ -89,6 +102,11 @@ export class EditingShortcutsPlugin implements SkyNotePlugin {
       if (!node || rest.length > 0 || node.locked || !node.textBlocks?.length) return false;
       session.requestTextEditing(node.id);
     } else if (e.key === 'Escape') {
+      const parentGroupId = resolveParentGroupId(this.ctx);
+      if (parentGroupId) {
+        session.setSelection({ nodeIds: [parentGroupId], connectorIds: [] });
+        return true;
+      }
       session.setSelection({ nodeIds: [], connectorIds: [] });
       return false;
     } else if (!mod && (e.key === 'Delete' || e.key === 'Backspace')) {

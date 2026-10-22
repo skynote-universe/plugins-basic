@@ -8,7 +8,9 @@ import { StickyNodeType } from './nodes/sticky';
 import { FreeTextNodeType } from './nodes/free-text';
 import { ShapeNodeType } from './nodes/shapes';
 import { FrameNodeType } from './nodes/frame';
+import { GroupNodeType } from './nodes/group';
 import { ImageNodeType } from './nodes/image';
+import { StackLayoutDefinition } from './layout/stack-layout';
 
 export class BasicNodesPlugin implements SkyNotePlugin {
   readonly id = '@skynote/plugins-basic/nodes';
@@ -20,6 +22,8 @@ export class BasicNodesPlugin implements SkyNotePlugin {
     ctx.registerNodeType(new FreeTextNodeType());
     ctx.registerNodeType(new ShapeNodeType());
     ctx.registerNodeType(new FrameNodeType());
+    ctx.registerNodeType(new GroupNodeType());
     ctx.registerNodeType(new ImageNodeType());
+    ctx.registerLayout(new StackLayoutDefinition());
   }
 }

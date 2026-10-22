@@ -8,6 +8,7 @@ import {
   SkyNoteEngine,
   applyThemeToPrimitives,
   isAspectLocked,
+  layoutText,
   CANVAS_PALETTE,
   type CanvasPrimitive,
   type FontMeasurer,
@@ -37,6 +38,26 @@ function setText(engine: SkyNoteEngine, id: string, text: string): void {
 }
 
 describe('基础节点插件', () => {
+  it('组合不支持通用空节点新建，空选区与单节点不编组，至少两个节点才创建组合', () => {
+    const engine = createEngine();
+    const store = engine.documentStore;
+    expect(engine.nodeTypes.get('group')?.createContent).toBeUndefined();
+    expect(() => store.createNode({ nodeType: 'group', id: 'empty', x: 0, y: 0 })).toThrow('不支持新建');
+    expect(store.getNode('empty')).toBeUndefined();
+    expect(store.groupNodes([])).toBeNull();
+    expect(store.canUndo).toBe(false);
+    store.createNode({ nodeType: 'shape', id: 'a', x: 0, y: 0 });
+    store.clearHistory();
+    expect(store.groupNodes(['a'])).toBeNull();
+    expect(store.canUndo).toBe(false);
+    store.createNode({ nodeType: 'shape', id: 'b', x: 200, y: 0 });
+    const group = store.groupNodes(['a', 'b'])!;
+    expect(store.getNode(group)?.nodeType).toBe('group');
+    store.removeEntities({ nodeIds: ['a', 'b'] });
+    expect(store.getNode(group)).toBeUndefined();
+    engine.destroy();
+  });
+
   it('一次注册便签、自由文本与形状三种节点类型', () => {
     const engine = createEngine();
     expect(['sticky', 'free-text', 'shape'].every((type) => engine.nodeTypes.get(type))).toBe(true);
@@ -169,19 +190,19 @@ describe('自由文本', () => {
     expect(store.canFitContent('t')).toBe(false);
   });
 
-  it('自由文本缩放保留精度：字号只保留两位小数，宽度原样写入 (像素对齐交给渲染端)', () => {
+  it('自由文本缩放将字号及固定尺寸写入为整数像素', () => {
     const engine = createEngine();
     const store = engine.documentStore;
     store.createNode({ nodeType: 'free-text', id: 't', x: 0, y: 0, options: { text: 'hello' } });
     const node = store.getNode('t')!;
     const def = engine.nodeTypes.get('free-text')!;
 
-    // 拖角缩放 1.13 倍：18px → 20.34px，不跳档到整数，避免缩放过程中文字反复折行
+    // 拖角缩放 1.13 倍：18px → 20px；固定宽度同样在写入时取整。
     const resized = def.applyResize!(node, { handle: 'se', width: 50.85, height: 28.25, scale: 1.13 });
-    expect(resized.textBlocks?.[0].style?.fontSize).toBe(20.34);
+    expect(resized.textBlocks?.[0].style?.fontSize).toBe(20);
 
     const sideResized = def.applyResize!(node, { handle: 'e', width: 145.38, height: 26, scale: 1 });
-    expect(sideResized.textBlocks?.[0].explicitWidth).toBe(145.38);
+    expect(sideResized.textBlocks?.[0].explicitWidth).toBe(145);
   });
 });
 
@@ -269,6 +290,29 @@ describe('圆角', () => {
 });
 
 describe('画框', () => {
+  it('标题行内字号和行高改变时，标题带与真实单行排版高度一致', () => {
+    const engine = createEngine();
+    const store = engine.documentStore;
+    store.createNode({ nodeType: 'frame', id: 'f', x: 0, y: 0, autoWrap: false });
+    store.updateNode('f', {
+      textBlocks: [
+        {
+          id: 'title',
+          slot: 'title',
+          runs: [
+            { text: '大字', fontSize: 48, lineHeight: '32px' },
+            { text: '高行', fontSize: 14, lineHeight: '80px' }
+          ]
+        }
+      ]
+    });
+    const [, primitive] = compose(engine, 'f') as [CanvasPrimitive, TextPrimitive];
+    const expected = Math.ceil(layoutText(primitive.runs, primitive.style, {}, fakeMeasurer).height);
+    expect(primitive.height).toBe(expected);
+    expect(primitive.y).toBe(-expected - 4);
+    expect(engine.nodeTypes.get('frame')!.extent!(store.getNode('f')!).top).toBe(-expected - 4);
+    engine.destroy();
+  });
   it('标题固定为单行且宽度等于画框宽度，超长支持省略，底部距画框 4px', () => {
     const engine = createEngine();
     engine.documentStore.createNode({
