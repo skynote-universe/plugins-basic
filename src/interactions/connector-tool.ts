@@ -299,7 +299,7 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
       } else {
         if (this.draft) this.finishDraft();
         this.ctx.host.overlay.clear(HINT_SESSION);
-        this.ctx.host.setCursor('default');
+        if (change.previousTool === CONNECTOR_TOOL) this.ctx.host.setCursor('default');
       }
     }
     if (

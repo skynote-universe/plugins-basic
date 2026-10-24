@@ -261,7 +261,13 @@ export function setFrameAutoLayout(
         );
         const childIds = [...entities.getChildIds(frame.id)];
         if (childIds.length > 0) {
-          document.updateNodes(childIds, (child) => (child.layout ? {} : { layoutItem: undefined }), edit);
+          // 自带布局的子节点只去掉空的成员标记，保留它给自己布局的根设置 (如整张导图的分支样式)
+          document.updateNodes(
+            childIds,
+            (child) =>
+              child.layout && Object.keys(child.layoutItem ?? {}).length > 0 ? {} : { layoutItem: undefined },
+            edit
+          );
         }
         continue;
       }

@@ -14,7 +14,7 @@ import {
   type Point,
   type TextInputSession
 } from '@skynote/core';
-import { BasicNodesPlugin, SelectionPlugin, TextEditPlugin, TransformPlugin } from '../src';
+import { BasicNodesPlugin, SelectionPlugin, TextEditPlugin, TransformPlugin, setFrameAutoLayout } from '../src';
 
 class FakeHost implements CanvasHost, OverlayChannel {
   readonly sessions = new Map<string, readonly CanvasPrimitive[]>();
@@ -205,5 +205,25 @@ describe('画框体验增强 (ADR-145 阶段二)', () => {
     expect(store.getNode('F')).toBeUndefined();
     expect(store.getNode('c')?.parentId).toBeUndefined();
     expect(engine.getNodeWorldBounds('c')).toEqual(beforeC);
+  });
+
+  it('离开自动布局画框 (解散或关闭自动布局)：普通成员去掉标记；自带布局的子节点只去掉空标记，保留给自己布局的根设置', () => {
+    for (const leave of ['ungroup', 'disable'] as const) {
+      const { engine, store } = setup();
+      store.createNode({ nodeType: 'frame', id: 'inner', x: 100, y: 20, width: 80, height: 60, parentId: 'F' });
+      store.createNode({ nodeType: 'frame', id: 'styled', x: 200, y: 20, width: 80, height: 60, parentId: 'F' });
+      setFrameAutoLayout(store, engine.entityStore, ['F'], {});
+      // inner / styled 自带布局 (如导图中心主题)；styled 的 layoutItem 还带着给自己布局的根设置
+      store.updateNodes(['inner', 'styled'], { layout: { type: 'stack', options: {} } });
+      store.updateNodes(['styled'], { layoutItem: { branch: { branchStyle: { stroke: '$red' } } } });
+      expect(store.getNode('c')?.layoutItem).toEqual({});
+      expect(store.getNode('inner')?.layoutItem).toEqual({});
+
+      if (leave === 'ungroup') store.ungroupNodes(['F']);
+      else setFrameAutoLayout(store, engine.entityStore, ['F'], null);
+      expect(store.getNode('c')?.layoutItem).toBeUndefined();
+      expect(store.getNode('inner')?.layoutItem).toBeUndefined();
+      expect(store.getNode('styled')?.layoutItem).toEqual({ branch: { branchStyle: { stroke: '$red' } } });
+    }
   });
 });

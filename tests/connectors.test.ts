@@ -425,6 +425,19 @@ describe('快速连接', () => {
     expect([...engine.session.selectedNodeIds]).toEqual([id]);
   });
 
+  it('只在连线工具被切走时复位光标，切换其他工具不覆盖新工具设好的光标', () => {
+    const { engine, host } = setup();
+    engine.session.setTool(CONNECTOR_TOOL);
+    expect(host.cursor).toBe('crosshair');
+    engine.session.setTool('select');
+    expect(host.cursor).toBe('default');
+    // 另一个工具 (如画笔) 激活时设了十字光标：连线工具的监听不再把它改回默认
+    engine.session.setTool('brush');
+    host.setCursor('crosshair');
+    engine.session.setTool('pen');
+    expect(host.cursor).toBe('crosshair');
+  });
+
   it('选中节点后切换到连线工具：「+」随之消失', () => {
     const { engine, host } = setup();
     engine.session.setSelection({ nodeIds: ['a'] });

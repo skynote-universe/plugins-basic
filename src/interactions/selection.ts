@@ -465,10 +465,12 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
       const unmovedLayoutIds = leavingLayoutIds.filter((id) => !isStackLayoutMember(ctx, id));
       ctx.document.reparentNodes(ids, targetId, { groupId, label });
       if (leavingLayoutIds.length > 0) {
-        ctx.document.updateNodes(leavingLayoutIds, (node) => (node.layout ? {} : { layoutItem: undefined }), {
-          groupId,
-          label
-        });
+        // 自带布局的节点只去掉空的成员标记，保留它给自己布局的根设置 (如整张导图的分支样式)
+        ctx.document.updateNodes(
+          leavingLayoutIds,
+          (node) => (node.layout && Object.keys(node.layoutItem ?? {}).length > 0 ? {} : { layoutItem: undefined }),
+          { groupId, label }
+        );
         if (unmovedLayoutIds.length > 0 && (moved.x !== 0 || moved.y !== 0)) {
           ctx.document.moveEntities({ nodeIds: unmovedLayoutIds }, moved, { groupId, label });
         }
