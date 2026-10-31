@@ -524,9 +524,8 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
         }
       }
 
-      const record = source as unknown as Record<string, unknown>;
-      const pathField = record.path as { subpaths?: unknown } | undefined;
-      const inkField = record.ink as { samples?: unknown; mode?: unknown } | undefined;
+      const pathField = (source as { path?: { subpaths?: unknown } }).path;
+      const inkField = (source as { ink?: { samples?: unknown; mode?: unknown } }).ink;
 
       const flattenedOptions: Record<string, unknown> = {
         ...copiedProps,

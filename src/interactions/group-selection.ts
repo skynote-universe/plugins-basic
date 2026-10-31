@@ -3,7 +3,24 @@
  * @description 组合 (Group) 选区归并、双击逐层下钻与 Escape 退回上层纯函数 (ADR-145)
  */
 
-import { GROUP_NODE_TYPE, type CanvasPluginContext } from '@skynote/core';
+import { GROUP_NODE_TYPE, type CanvasPluginContext, type Point } from '@skynote/core';
+
+/** 真实实体未命中后才查询编组空隙，复用空间索引，避免指针移动时扫描全部节点。 */
+export function hitGroupBounds(ctx: CanvasPluginContext, point: Point): string | undefined {
+  let result: string | undefined;
+  let area = Infinity;
+  for (const id of ctx.spatial.search({ left: point.x, top: point.y, right: point.x, bottom: point.y })) {
+    if (ctx.entities.getNode(id)?.entity.nodeType !== GROUP_NODE_TYPE) continue;
+    const target = resolveGroupTarget(ctx, id);
+    const bounds = ctx.spatial.getBounds(target)!;
+    const nextArea = (bounds.right - bounds.left) * (bounds.bottom - bounds.top);
+    if (nextArea < area) {
+      result = target;
+      area = nextArea;
+    }
+  }
+  return result;
+}
 
 export interface ResolveGroupTargetOptions {
   /** 按住 Ctrl / Cmd 时直接穿透选中最底层叶子节点 */

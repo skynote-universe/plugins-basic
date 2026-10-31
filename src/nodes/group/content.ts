@@ -4,8 +4,7 @@
  *
  * 设计考量 (Why):
  * 1. 与画框 (Frame) 职责分离：组合自身不绘制任何图元、不裁剪子节点 (clipChildren: false)，也不接收拖拽落入 (acceptsChildren: false)。
- * 2. 空白穿透：hitTest 与 intersectsBounds 始终返回 false，点选或框选组合内部的空白间隙时直接穿透，
- *    只有命中内部子图元时才由交互层按组合层级归并或双击下钻。
+ * 2. 本体拾取保持穿透；交互层在真实实体未命中时以空间索引查询编组空隙，成员命中仍按层级归并或双击下钻。
  * 3. 组合只通过已有节点编组生成，不提供空节点新建接口；外框由事务内容器依赖派生自动紧缩。
  */
 
@@ -21,7 +20,7 @@ export class GroupNodeType implements NodeTypeDefinition {
   readonly clipChildren = false;
   readonly acceptsChildren = false;
 
-  /** 组合自身无填充与边框，空白区域不响应点选，由内部子节点触发拾取后向上归并 */
+  /** 原生实体命中保持穿透，空隙整体选择由通用交互层处理。 */
   hitTest(): boolean {
     return false;
   }

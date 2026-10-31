@@ -127,7 +127,81 @@ function key(engine: Engine, code: string, init: Partial<CanvasKeyboardEvent> = 
 
 const selection = (engine: Engine) => [...engine.session.selectedNodeIds].sort();
 
+describe('多选框空白移动', () => {
+  it('空白单击取消多选，拖动整体且一步撤销，未越过阈值不写历史', () => {
+    const { engine, store, captured } = setup();
+    try {
+      engine.session.setSelection({ nodeIds: ['a', 'b'] });
+      pointer(engine, 'down', { x: 230, y: 50 });
+      expect(selection(engine)).toEqual(['a', 'b']);
+      pointer(engine, 'move', { x: 231, y: 51 });
+      pointer(engine, 'up', { x: 231, y: 51 });
+      expect(selection(engine)).toEqual([]);
+      expect(store.canUndo).toBe(false);
+      engine.session.setSelection({ nodeIds: ['a', 'b'] });
+      drag(engine, { x: 230, y: 50 }, { x: 260, y: 90 });
+      expect(store.getNode('a')).toMatchObject({ x: 30, y: 40 });
+      expect(store.getNode('b')).toMatchObject({ x: 330, y: 40 });
+      expect(selection(engine)).toEqual(['a', 'b']);
+      expect(captured.size).toBe(0);
+      store.undo();
+      expect(store.getNode('a')).toMatchObject({ x: 0, y: 0 });
+      expect(store.getNode('b')).toMatchObject({ x: 300, y: 0 });
+    } finally {
+      engine.destroy();
+    }
+  });
+
+  it('框外空白清空选区，框内真实实体优先点选，Shift空白仍可框选', () => {
+    const { engine, store, overlay } = setup();
+    try {
+      engine.session.setSelection({ nodeIds: ['a', 'b'] });
+      click(engine, { x: 230, y: 150 });
+      expect(selection(engine)).toEqual([]);
+      store.createNode({ nodeType: 'shape', id: 'inside', x: 210, y: 20, width: 40, height: 40 });
+      engine.session.setSelection({ nodeIds: ['a', 'b'] });
+      click(engine, { x: 230, y: 40 });
+      expect(selection(engine)).toEqual(['inside']);
+      engine.session.setSelection({ nodeIds: ['a', 'b'] });
+      pointer(engine, 'down', { x: 180, y: 70 }, { shift: true });
+      pointer(engine, 'move', { x: 195, y: 90 }, { shift: true });
+      expect(overlay.has('selection:marquee')).toBe(true);
+      pointer(engine, 'up', { x: 195, y: 90 }, { shift: true });
+    } finally {
+      engine.destroy();
+    }
+  });
+});
+
 describe('点选与加选', () => {
+  it('锁定节点可单选解锁，但Shift加选、框选和快捷键全选均排除它', () => {
+    const { engine, store } = setup();
+    try {
+      store.updateNode('b', { locked: true });
+      click(engine, { x: 10, y: 10 });
+      click(engine, { x: 310, y: 10 }, { shift: true });
+      expect(selection(engine)).toEqual(['a']);
+      click(engine, { x: 310, y: 10 });
+      expect(selection(engine)).toEqual(['b']);
+      click(engine, { x: 10, y: 10 }, { shift: true });
+      expect(selection(engine)).toEqual(['a']);
+      drag(engine, { x: -20, y: -30 }, { x: 600, y: 350 });
+      expect(selection(engine)).toEqual(['a']);
+      key(engine, 'KeyA', { ctrlKey: true });
+      expect(selection(engine)).toEqual(['a', 'frame']);
+      store.updateNode('frame', { locked: true });
+      key(engine, 'KeyA', { ctrlKey: true });
+      expect(selection(engine)).toEqual(['a']);
+      store.updateNode('b', { locked: false });
+      click(engine, { x: 310, y: 10 }, { shift: true });
+      expect(selection(engine)).toEqual(['a', 'b']);
+      store.updateNode('b', { locked: true });
+      expect(selection(engine)).toEqual(['a']);
+    } finally {
+      engine.destroy();
+    }
+  });
+
   it('单击选中、Shift 加选与反选、单击空白清空', () => {
     const { engine } = setup();
     pointer(engine, 'down', { x: 10, y: 10 });
@@ -334,7 +408,7 @@ describe('编辑快捷键', () => {
     expect(store.getNode('a')).toBeDefined();
 
     key(engine, 'KeyA', { key: 'a', ctrlKey: true });
-    expect(selection(engine)).toEqual(['a', 'b', 'frame']);
+    expect(selection(engine)).toEqual(['a', 'frame']);
     expect(key(engine, 'Escape', { key: 'Escape' })).toBe(false);
     expect(selection(engine)).toEqual([]);
   });
@@ -371,6 +445,7 @@ describe('编辑快捷键', () => {
     engine.session.setSelection({ nodeIds: ['a', 'b'] });
     key(engine, 'KeyL', { key: 'L', ctrlKey: true, shiftKey: true });
     expect(store.getNode('a')!.locked).toBe(true);
+    engine.session.setSelection({ nodeIds: ['a', 'b'] });
     key(engine, 'KeyL', { key: 'L', ctrlKey: true, shiftKey: true });
     expect(store.getNode('a')!.locked).toBe(false);
     expect(store.getNode('b')!.locked).toBe(false);
@@ -390,7 +465,8 @@ describe('选中框', () => {
     engine.session.setSelection({ nodeIds: ['a', 'c'] });
     let outline = overlay.get('selection:outline')!;
     expect(outline.transient).toBe(false);
-    expect(outline.primitives).toHaveLength(2);
+    expect(outline.primitives).toHaveLength(3);
+    expect(outline.primitives[2].kind).toBe('rect');
     expect(outline.primitives[0]).toMatchObject({
       kind: 'polygon',
       points: [0, 0, 160, 0, 160, 100, 0, 100],

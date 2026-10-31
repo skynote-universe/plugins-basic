@@ -38,7 +38,7 @@ import {
   type SkyNotePlugin
 } from '@skynote/core';
 import { SNAP_THRESHOLD_PX, collectSnapTargets, drawSnapGuides, type SnapTargets } from './snapping';
-import { resolveGroupTarget } from './group-selection';
+import { resolveGroupTarget, hitGroupBounds } from './group-selection';
 import { canAcceptLayoutChildren, isInstalledLayoutMember, isStackLayoutMember } from '../layout/layout-membership';
 import { STACK_LAYOUT_ID, computeStackInsertIndex } from '../layout/stack-layout';
 
@@ -54,6 +54,7 @@ const DRAG_THRESHOLD_PX = 3;
 interface PressTarget {
   kind: 'node' | 'connector';
   id: string;
+  subtree?: boolean;
 }
 
 type Gesture =
@@ -67,7 +68,7 @@ type Gesture =
       /** 开始拖动时被拖节点的世界外框与吸附候选；只拖连线时为 null */
       snap: { bounds: RectBounds; targets: SnapTargets } | null;
       /** 按下的实体；单击 (未拖拽) 抬起时用于收窄多选 */
-      target: PressTarget;
+      target: PressTarget | null;
       /** 按下前该节点已被选中，且未按 Shift */
       wasSelected: boolean;
       dragging: boolean;
@@ -101,6 +102,16 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
         this.finish(this.gesture.pointerId);
       }
     });
+    ctx.onDocumentChange((changes) => {
+      const { session, entities } = ctx;
+      if (session.selectedNodeIds.size + session.selectedConnectorIds.size < 2) return;
+      const nodeIds = [...session.selectedNodeIds];
+      if (!nodeIds.some((id) => changes.nodes.data.has(id) && entities.getNode(id)?.entity.locked)) return;
+      session.setSelection({
+        nodeIds: nodeIds.filter((id) => !entities.getNode(id)?.entity.locked),
+        subtreeNodeIds: session.selectedSubtreeNodeIds
+      });
+    });
   }
 
   unmount(): void {
@@ -113,13 +124,25 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
     const hit = this.ctx.hitTest(e.point);
     const deep = e.modifiers.ctrl || e.modifiers.meta;
     const drillDown = e.clickCount === 2 && !e.modifiers.shift && !deep;
-    const target: PressTarget | null =
+    let target: PressTarget | null =
       hit?.kind === 'connector'
         ? { kind: 'connector', id: hit.connector.id }
         : e.target
           ? { kind: 'node', id: resolveGroupTarget(this.ctx, e.target.id, { deep, drillDown }) }
           : null;
-    if (target) {
+    if (!target && !deep && !e.modifiers.shift && this.hitSelectionBlank(e.point)) {
+      this.startPress(null, e, false);
+    } else if (!target && !deep) {
+      const id = this.ctx.document.selectionGeometry.hitTestSubtree(e.point, 4 / this.ctx.session.viewport.zoom);
+      if (id) target = { kind: 'node', id, subtree: true };
+      else {
+        const groupId = hitGroupBounds(this.ctx, e.point);
+        if (groupId) target = { kind: 'node', id: groupId };
+      }
+    }
+    if (this.gesture) {
+      // 多选框空白处已认领为整体移动，保持当前范围。
+    } else if (target) {
       this.press(target, e);
     } else {
       const { session } = this.ctx;
@@ -145,10 +168,11 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
     if (gesture.kind === 'marquee') {
       const rect = boundsFromPoints(gesture.startWorld, e.point);
       this.drawMarquee(rect);
-      const nodeHits = new Set(gesture.baseNodes);
+      const nodeHits = new Set([...gesture.baseNodes].filter((id) => !ctx.entities.getNode(id)?.entity.locked));
       for (const id of ctx.spatial.search(rect)) {
         if (!ctx.intersectsNodeBounds(id, rect)) continue;
-        nodeHits.add(ctx.entities.getAncestorIds(id).at(-1) ?? id);
+        const rootId = ctx.entities.getAncestorIds(id).at(-1) ?? id;
+        if (!ctx.entities.getNode(rootId)?.entity.locked) nodeHits.add(rootId);
       }
       const connectorHits = new Set(gesture.baseConnectors);
       for (const id of ctx.connectors.connectorSpatialIndex.search(rect)) {
@@ -157,7 +181,11 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
           connectorHits.add(id);
         }
       }
-      ctx.session.setSelection({ nodeIds: nodeHits, connectorIds: connectorHits });
+      ctx.session.setSelection({
+        nodeIds: nodeHits,
+        connectorIds: connectorHits,
+        subtreeNodeIds: [...nodeHits].filter((id) => ctx.document.selectionGeometry.canSelectSubtree(id))
+      });
       return;
     }
 
@@ -214,12 +242,17 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
   onPointerUp(e: CanvasPointerEvent): void {
     const { gesture } = this;
     if (!gesture || gesture.pointerId !== e.pointerId) return;
+    // 多选框空白处松手且未达到拖动阈值时取消选区，按下时保留以便整体拖动。
+    if (gesture.kind === 'press' && !gesture.dragging && !gesture.target) {
+      this.ctx.session.setSelection({ nodeIds: [], connectorIds: [] });
+    }
     // 在多选中单击其中一个 (未拖拽)：收窄为只选它
-    if (gesture.kind === 'press' && !gesture.dragging && gesture.wasSelected) {
+    if (gesture.kind === 'press' && !gesture.dragging && gesture.wasSelected && gesture.target) {
       this.ctx.session.setSelection({
         nodeIds: [],
         connectorIds: [],
-        [selectionKey(gesture.target.kind)]: [gesture.target.id]
+        [selectionKey(gesture.target.kind)]: [gesture.target.id],
+        subtreeNodeIds: gesture.target.subtree ? [gesture.target.id] : []
       });
     }
     // 先在托管状态下完成改挂 / 换序 (拖出画框的成员保持松手处的世界位置)，再由 finish 释放并归位
@@ -261,7 +294,11 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
 
     const toLocal = invertMatrix(ctx.entities.getWorldTransform(targetId)!);
     const localPoint = applyMatrix(toLocal, pointerWorld.x, pointerWorld.y);
-    const insertIndex = computeStackInsertIndex(targetNode, remainingMembers, localPoint);
+    const insertIndex = computeStackInsertIndex(targetNode, remainingMembers, localPoint, (node) =>
+      node.layout && ctx.layouts.get(node.layout.type)?.footprint === 'subtree'
+        ? ctx.document.selectionGeometry.getSubtreeLocalBounds(node.id)
+        : undefined
+    );
     const nextMemberIds = [
       ...remainingMembers.slice(0, insertIndex).map((m) => m.id),
       ...orderedIds,
@@ -290,15 +327,63 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
     const selected = target.kind === 'node' ? session.selectedNodeIds : session.selectedConnectorIds;
     const wasSelected = selected.has(target.id);
     if (e.modifiers.shift) {
+      if (target.kind === 'node' && this.ctx.entities.getNode(target.id)?.entity.locked) return;
       const next = new Set(selected);
       if (wasSelected) next.delete(target.id);
       else next.add(target.id);
-      session.setSelection({ [key]: next });
+      const scopes = new Set(session.selectedSubtreeNodeIds);
+      if (target.subtree && !wasSelected) scopes.add(target.id);
+      else if (target.kind === 'node') scopes.delete(target.id);
+      const nodeIds = target.kind === 'node' ? next : session.selectedNodeIds;
+      session.setSelection({
+        [key]: next,
+        nodeIds: [...nodeIds].filter((id) => !this.ctx.entities.getNode(id)?.entity.locked),
+        subtreeNodeIds: scopes
+      });
       // Shift 点掉一个后不再拖拽它
       if (wasSelected) return;
     } else if (!wasSelected) {
-      session.setSelection({ nodeIds: [], connectorIds: [], [key]: [target.id] });
+      session.setSelection({
+        nodeIds: [],
+        connectorIds: [],
+        [key]: [target.id],
+        subtreeNodeIds: target.subtree ? [target.id] : []
+      });
     }
+    if (wasSelected && target.kind === 'node' && session.selectedSubtreeNodeIds.has(target.id) !== !!target.subtree) {
+      const scopes = new Set(session.selectedSubtreeNodeIds);
+      if (target.subtree) scopes.add(target.id);
+      else scopes.delete(target.id);
+      session.setSelection({ subtreeNodeIds: scopes });
+    }
+    this.startPress(target, e, wasSelected && !e.modifiers.shift);
+  }
+
+  /** 仅在真实实体未命中时检查多选框，避免空白拖动抢占节点、连线和控制柄。 */
+  private hitSelectionBlank(point: Point): boolean {
+    const { session, document, spatial } = this.ctx;
+    if (session.selectedNodeIds.size < 2) return false;
+    let bounds: RectBounds | undefined;
+    let count = 0;
+    for (const id of session.selectedNodeIds) {
+      const own = session.selectedSubtreeNodeIds.has(id)
+        ? document.selectionGeometry.getSubtreeBounds(id)
+        : spatial.getBounds(id);
+      if (!own) continue;
+      bounds = bounds ? unionBounds(bounds, own) : own;
+      count++;
+    }
+    return (
+      !!bounds &&
+      count > 1 &&
+      point.x >= bounds.left &&
+      point.x <= bounds.right &&
+      point.y >= bounds.top &&
+      point.y <= bounds.bottom
+    );
+  }
+
+  private startPress(target: PressTarget | null, e: CanvasPointerEvent, wasSelected: boolean): void {
     this.gesture = {
       kind: 'press',
       pointerId: e.pointerId,
@@ -307,7 +392,7 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
       moved: { x: 0, y: 0 },
       snap: null,
       target,
-      wasSelected: wasSelected && !e.modifiers.shift,
+      wasSelected,
       dragging: false,
       groupId: generateId('drag'),
       dropTarget: undefined
@@ -322,7 +407,13 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
       (id) => !ctx.entities.getNode(id)?.entity.locked && !ctx.entities.getAncestorIds(id).some((a) => selected.has(a))
     );
     if (ids.length === 0) return null;
-    const bounds = ids.map((id) => ctx.spatial.getBounds(id)!).reduce(unionBounds);
+    const bounds = ids
+      .map((id) =>
+        ctx.session.selectedSubtreeNodeIds.has(id)
+          ? ctx.document.selectionGeometry.getSubtreeBounds(id)!
+          : ctx.spatial.getBounds(id)!
+      )
+      .reduce(unionBounds);
     return { bounds, targets: collectSnapTargets(ctx, ids) };
   }
 

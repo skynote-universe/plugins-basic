@@ -59,8 +59,10 @@ export class EditingShortcutsPlugin implements SkyNotePlugin {
     } else if (mod && e.code === 'KeyY') {
       document.redo();
     } else if (mod && e.code === 'KeyA') {
+      const nodeIds = [...entities.getChildIds(undefined)].filter((id) => !entities.getNode(id)!.entity.locked);
       session.setSelection({
-        nodeIds: entities.getChildIds(undefined),
+        nodeIds,
+        subtreeNodeIds: nodeIds.filter((id) => document.selectionGeometry.canSelectSubtree(id)),
         connectorIds: entities.getAllConnectors().map((runtime) => runtime.entity.id)
       });
     } else if (mod && e.code === 'KeyG') {
@@ -69,7 +71,12 @@ export class EditingShortcutsPlugin implements SkyNotePlugin {
       if (e.shiftKey) {
         const released = document.ungroupNodes(ids);
         if (released.length === 0) return false;
-        session.setSelection({ nodeIds: released, connectorIds: [] });
+        const selected = released.filter((id) => !entities.getNode(id)!.entity.locked);
+        session.setSelection({
+          nodeIds: selected,
+          subtreeNodeIds: selected.filter((id) => document.selectionGeometry.canSelectSubtree(id)),
+          connectorIds: []
+        });
       } else {
         const groupId = document.groupNodes(ids);
         if (!groupId) return false;

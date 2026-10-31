@@ -387,6 +387,8 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
 
   private resolveSelection(): SelectionFrame | null {
     const { session, entities, nodeTypes } = this.ctx;
+    // 整体选区移动/排列不等于修改根主题的尺寸，首版不提供根节点控制柄。
+    if (session.selectedSubtreeNodeIds.size > 0) return null;
     // 画布内编辑文字时不显示控制柄：按在文字上是定位光标而不是缩放
     if (session.textEditing) return null;
     const selected = session.selectedNodeIds;
@@ -397,7 +399,9 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     const coveredAncestors = new Map<string, boolean>();
     for (const id of selected) {
       const runtime = entities.getNode(id);
-      if (!runtime || runtime.entity.locked) continue;
+      if (!runtime) continue;
+      // 锁定目标不能从多选中剔除后单独变换其余节点，否则控制柄与总外框不再代表同一选区。
+      if (runtime.entity.locked) return null;
       // 只取最顶层目标；共享父链缓存“自身或祖先已选中”，避免逐目标构造完整祖先数组。
       const path: string[] = [];
       let parentId = runtime.entity.parentId;
@@ -905,7 +909,11 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
       this.redraw();
       return;
     }
-    const selectionChanged = change.toggledNodeIds.size > 0 || change.textEditingChanged || change.readOnlyChanged;
+    const selectionChanged =
+      change.selectionScopeChanged ||
+      change.toggledNodeIds.size > 0 ||
+      change.textEditingChanged ||
+      change.readOnlyChanged;
     if (selectionChanged && this.gesture) this.finish(this.gesture.pointerId);
     if (change.viewportChanged && this.gesture) this.gesture.lastInput = undefined;
     if (selectionChanged) this.selectionCache = undefined;
@@ -985,7 +993,7 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   /**
-   * 多选时画整体外框；角控制柄为随外框旋转的小方块 (屏幕尺寸固定)。
+   * 角控制柄为随外框旋转的小方块 (屏幕尺寸固定)；选区外框由选区描边插件独立绘制。
    * 只能调一轴时改为在该轴两条边的中点画条形控制柄，一眼看出只能沿这一轴拉伸
    */
   private redraw(): void {
@@ -1001,19 +1009,6 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
     const strokeWidth = 1 / viewport.zoom;
     const half = HANDLE_SIZE_PX / 2 / viewport.zoom;
     const primitives: CanvasPrimitive[] = [];
-    if (selection.targets.length > 1) {
-      const corners = CORNERS.map((corner) => {
-        const p = this.handlePosition(selection.frame, corner);
-        return applyMatrix(toWorld, p.x, p.y);
-      });
-      primitives.push({
-        kind: 'polygon',
-        points: corners.flatMap((p) => [p.x, p.y]),
-        stroke: theme.selectionStroke,
-        strokeWidth,
-        strokeJoin: 'miter'
-      });
-    }
     const { frame } = selection;
     // 条形控制柄不超过所在边长度的一半 (缩小视图时外框很矮也不会溢出)
     const along = (side: number) => Math.min(BAR_LENGTH_PX / 2 / viewport.zoom, side / 4);

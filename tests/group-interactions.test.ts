@@ -64,6 +64,53 @@ class FakeHost implements CanvasHost, OverlayChannel {
 
 const fonts = { measureWidth: (text: string, font: { size: number }) => [...text].length * font.size * 0.5 };
 
+it('编组空隙可悬停、选择并拖动整体，内部成员直选后隐藏整体悬停框', () => {
+  const { engine, store, host } = setup();
+  try {
+    const group = store.groupNodes(['a', 'b'])!;
+    engine.session.setSelection({ nodeIds: [] });
+    const blank = { x: 225, y: 140 };
+    expect(engine.hitTest(blank)).toBeNull();
+    pointer(engine, 'move', blank);
+    expect(host.sessions.has('selection:hover')).toBe(true);
+    pointer(engine, 'down', blank);
+    pointer(engine, 'up', blank);
+    expect([...engine.session.selectedNodeIds]).toEqual([group]);
+    expect(host.sessions.get('transform:handles')!.primitives).toHaveLength(4);
+    const before = { ...store.getNode(group)! };
+    const child = { ...store.getNode('a')! };
+    pointer(engine, 'down', blank);
+    pointer(engine, 'move', { x: 255, y: 180 });
+    pointer(engine, 'up', { x: 255, y: 180 });
+    expect(store.getNode(group)).toMatchObject({ x: before.x + 30, y: before.y + 40 });
+    expect(store.getNode('a')).toEqual(child);
+    store.undo();
+    expect(store.getNode(group)).toEqual(before);
+    engine.session.setSelection({ nodeIds: ['a'] });
+    pointer(engine, 'move', blank);
+    expect(host.sessions.has('selection:hover')).toBe(false);
+  } finally {
+    engine.destroy();
+  }
+});
+
+it('编组空隙中的真实节点优先，Ctrl点击空隙保持穿透', () => {
+  const { engine, store } = setup();
+  try {
+    store.groupNodes(['a', 'b']);
+    store.createNode({ nodeType: 'shape', id: 'foreign', x: 215, y: 130, width: 20, height: 20 });
+    pointer(engine, 'down', { x: 225, y: 140 });
+    pointer(engine, 'up', { x: 225, y: 140 });
+    expect([...engine.session.selectedNodeIds]).toEqual(['foreign']);
+    store.removeEntities({ nodeIds: ['foreign'] });
+    pointer(engine, 'down', { x: 225, y: 140 }, { ctrl: true });
+    pointer(engine, 'up', { x: 225, y: 140 }, { ctrl: true });
+    expect(engine.session.selectedNodeIds.size).toBe(0);
+  } finally {
+    engine.destroy();
+  }
+});
+
 function setup() {
   const engine = new SkyNoteEngine({ fonts })
     .use(new BasicNodesPlugin())

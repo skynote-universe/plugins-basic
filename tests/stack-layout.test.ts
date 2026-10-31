@@ -21,6 +21,7 @@ import {
 import {
   BasicNodesPlugin,
   SelectionPlugin,
+  SelectionOutlinePlugin,
   TransformPlugin,
   parseStackLayoutOptions,
   setFrameAutoLayout
@@ -52,6 +53,7 @@ function setup() {
   })
     .use(new BasicNodesPlugin())
     .use(new SelectionPlugin())
+    .use(new SelectionOutlinePlugin())
     .use(new TransformPlugin());
   const host = new FakeHost();
   engine.attachHost(host);
@@ -282,7 +284,8 @@ describe('画框自动堆叠布局 (ADR-145 阶段三)', () => {
     store.createNode({ nodeType: 'varying-bounds', id: 'b', x: 600, y: 0 });
     engine.session.setSelection({ nodeIds: ['a', 'b'] });
     // 只剩多选外框；单选的可调宽度不能绕过多选相对旋转约束。
-    expect(host.sessions.get('transform:handles')).toHaveLength(1);
+    expect(host.sessions.get('transform:handles')?.length ?? 0).toBe(0);
+    expect(host.sessions.get('selection:outline')!.at(-1)!.kind).toBe('rect');
     engine.destroy();
   });
 
@@ -325,7 +328,7 @@ describe('画框自动堆叠布局 (ADR-145 阶段三)', () => {
     store.createNode({ nodeType: 'mixed-handle', id: 'f', x: 0, y: 0 });
     store.createNode({ nodeType: 'shape', id: 'b', x: 600, y: 0, width: 400, height: 300 });
     engine.session.setSelection({ nodeIds: ['f', 'b'] });
-    expect(host.sessions.get('transform:handles')).toHaveLength(2);
+    expect(host.sessions.get('transform:handles')).toHaveLength(1);
     pointer(engine, 'down', { x: 1000, y: 150 });
     pointer(engine, 'move', { x: 2000, y: 150 });
     pointer(engine, 'up', { x: 2000, y: 150 });
@@ -1337,7 +1340,7 @@ describe('画框自动堆叠布局 (ADR-145 阶段三)', () => {
     store.createNode({ nodeType: 'shape', id: 'a', x: 400, y: 100, width: 80, height: 50 });
     setFrameAutoLayout(store, engine.entityStore, ['F'], {});
     engine.session.setSelection({ nodeIds: ['F', 'a'] });
-    expect(host.sessions.get('transform:handles')).toHaveLength(5);
+    expect(host.sessions.get('transform:handles')).toHaveLength(4);
     const id = store.groupNodes(['F', 'a']);
     engine.session.setSelection({ nodeIds: [id!] });
     expect(host.sessions.get('transform:handles')).toHaveLength(4);

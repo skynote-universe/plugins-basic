@@ -13,7 +13,7 @@ import {
   type Point,
   type TextInputSession
 } from '@skynote/core';
-import { BasicNodesPlugin, SelectionPlugin, TransformPlugin, setFrameAutoLayout } from '../src';
+import { BasicNodesPlugin, SelectionPlugin, SelectionOutlinePlugin, TransformPlugin, setFrameAutoLayout } from '../src';
 
 class LifecycleHost implements CanvasHost, OverlayChannel {
   readonly sessions = new Map<string, readonly CanvasPrimitive[]>();
@@ -36,7 +36,11 @@ class LifecycleHost implements CanvasHost, OverlayChannel {
 }
 
 function setup() {
-  const engine = new SkyNoteEngine().use(new BasicNodesPlugin()).use(new SelectionPlugin()).use(new TransformPlugin());
+  const engine = new SkyNoteEngine()
+    .use(new BasicNodesPlugin())
+    .use(new SelectionPlugin())
+    .use(new SelectionOutlinePlugin())
+    .use(new TransformPlugin());
   const host = new LifecycleHost();
   engine.attachHost(host);
   engine.session.setViewportSize({ width: 1600, height: 1000 });
@@ -51,6 +55,45 @@ function pointer(engine: SkyNoteEngine, phase: 'down' | 'move' | 'up', point: Po
 }
 
 describe('Transform 注册表生命周期', () => {
+  it.each(['locked', 'resize-none'] as const)(
+    '多选含%s节点时保留总外框，禁止缩放其余节点，解除限制后恢复控制柄',
+    (mode) => {
+      const { engine, host, store } = setup();
+      try {
+        engine.nodeTypes.register({ type: 'fixed', label: '固定', defaultData: {}, resize: 'none' });
+        store.createNode({ nodeType: 'shape', id: 'a', x: 0, y: 100, width: 100, height: 100 });
+        store.createNode({ nodeType: 'shape', id: 'b', x: 300, y: 100, width: 100, height: 100 });
+        engine.session.setSelection({ nodeIds: ['a', 'b'] });
+        expect(host.sessions.get('transform:handles')).toHaveLength(4);
+        store.updateNode('a', mode === 'locked' ? { locked: true } : { nodeType: 'fixed' });
+        // 底层显式注入混合锁定选区，验证变换插件仍有兜底；正常交互会排除锁定目标。
+        engine.session.setSelection({ nodeIds: ['a', 'b'] });
+        expect(host.sessions.get('selection:outline')!.at(-1)).toMatchObject({
+          kind: 'rect',
+          x: 0,
+          y: 100,
+          width: 400,
+          height: 100
+        });
+        expect(host.sessions.get('transform:handles')?.length ?? 0).toBe(0);
+        pointer(engine, 'down', { x: 400, y: 200 });
+        pointer(engine, 'move', { x: 450, y: 240 });
+        pointer(engine, 'up', { x: 450, y: 240 });
+        expect(store.getNode('a')).toMatchObject({ width: 100, height: 100 });
+        expect(store.getNode('b')).toMatchObject({ width: 100, height: 100 });
+        engine.session.setSelection({ nodeIds: ['a', 'b'] });
+        store.updateNode('a', mode === 'locked' ? { locked: false } : { nodeType: 'shape' });
+        expect(host.sessions.get('transform:handles')).toHaveLength(4);
+        store.undo();
+        expect(host.sessions.get('transform:handles')?.length ?? 0).toBe(mode === 'locked' ? 4 : 0);
+        store.redo();
+        expect(host.sessions.get('transform:handles')).toHaveLength(4);
+      } finally {
+        engine.destroy();
+      }
+    }
+  );
+
   it.each([false, true])('最顶层过滤保持父子选择顺序与锁定语义，反序=%s', (reverse) => {
     const { engine, host, store } = setup();
     store.createNode({ nodeType: 'frame', id: 'parent', x: 0, y: 0, width: 100, height: 100, autoWrap: false });
@@ -60,7 +103,8 @@ describe('Transform 注册表生命周期', () => {
     engine.session.setSelection({ nodeIds: ids });
     expect(host.sessions.get('transform:handles')).toHaveLength(4);
     store.updateNode('parent', { locked: true });
-    expect(host.sessions.has('transform:handles')).toBe(false);
+    expect([...engine.session.selectedNodeIds]).toEqual(['child']);
+    expect(host.sessions.get('transform:handles')).toHaveLength(4);
     engine.session.setSelection({ nodeIds: ['child'] });
     expect(host.sessions.get('transform:handles')).toHaveLength(4);
     engine.destroy();
@@ -73,7 +117,7 @@ describe('Transform 注册表生命周期', () => {
     engine.session.setSelection({ nodeIds: ['parent', 'child'] });
     expect(host.sessions.get('transform:handles')).toHaveLength(4);
     store.reparentNodes(['child'], undefined);
-    expect(host.sessions.get('transform:handles')).toHaveLength(5);
+    expect(host.sessions.get('transform:handles')).toHaveLength(4);
     store.undo();
     expect(host.sessions.get('transform:handles')).toHaveLength(4);
     store.redo();

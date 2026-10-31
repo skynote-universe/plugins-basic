@@ -17,7 +17,8 @@ import {
   type LayoutPlacement,
   type LayoutTree,
   type NodeEntity,
-  type Point
+  type Point,
+  type RectBounds
 } from '@skynote/core';
 
 export const STACK_LAYOUT_ID = 'stack' as const;
@@ -149,9 +150,15 @@ export class StackLayoutDefinition implements LayoutDefinition {
     const horizontal = direction === 'horizontal';
     let mainSize = 0;
     let crossSize = 0;
+    // 普通成员不额外分配占位对象，仅缓存声明了复合占位的成员。
+    let footprints: Map<string, Readonly<RectBounds>> | undefined;
     for (const child of children) {
-      mainSize += horizontal ? child.node.width : child.node.height;
-      crossSize = Math.max(crossSize, horizontal ? child.node.height : child.node.width);
+      const bounds = tree.getFootprint?.(child.node.id);
+      if (bounds) (footprints ??= new Map()).set(child.node.id, bounds);
+      const width = bounds ? bounds.right - bounds.left : child.node.width;
+      const height = bounds ? bounds.bottom - bounds.top : child.node.height;
+      mainSize += horizontal ? width : height;
+      crossSize = Math.max(crossSize, horizontal ? height : width);
     }
     mainSize += gap * Math.max(0, children.length - 1);
     const hugWidth = Math.round(Math.max(1, (horizontal ? mainSize : crossSize) + pad.left + pad.right));
@@ -169,15 +176,18 @@ export class StackLayoutDefinition implements LayoutDefinition {
       justify === 'space-between' && children.length > 1 ? gap + freeMain / (children.length - 1) : gap;
     let cursor = (horizontal ? pad.left : pad.top) + mainOffset;
     for (const child of children) {
-      const childCross = horizontal ? child.node.height : child.node.width;
+      const bounds = footprints?.get(child.node.id);
+      const width = bounds ? bounds.right - bounds.left : child.node.width;
+      const height = bounds ? bounds.bottom - bounds.top : child.node.height;
+      const childCross = horizontal ? height : width;
       const freeCross = Math.max(0, innerCross - childCross);
       const offset = align === 'center' ? freeCross / 2 : align === 'end' ? freeCross : 0;
       placements.set(child.node.id, {
-        x: Math.round(horizontal ? cursor : pad.left + offset),
-        y: Math.round(horizontal ? pad.top + offset : cursor),
+        x: Math.round((horizontal ? cursor : pad.left + offset) - (bounds?.left ?? 0)),
+        y: Math.round((horizontal ? pad.top + offset : cursor) - (bounds?.top ?? 0)),
         rotation: 0
       });
-      cursor += (horizontal ? child.node.width : child.node.height) + effectiveGap;
+      cursor += (horizontal ? width : height) + effectiveGap;
     }
     if (widthSizing === 'hug' || heightSizing === 'hug') {
       placements.set(root.id, {
@@ -197,13 +207,18 @@ export class StackLayoutDefinition implements LayoutDefinition {
 export function computeStackInsertIndex(
   root: Readonly<NodeEntity>,
   remainingMembers: readonly Readonly<NodeEntity>[],
-  localPoint: Point
+  localPoint: Point,
+  footprintOf?: (node: Readonly<NodeEntity>) => Readonly<RectBounds> | undefined
 ): number {
   const { direction } = parseStackLayoutOptions(root.layout?.options);
   const pos = direction === 'vertical' ? localPoint.y : localPoint.x;
   for (let i = 0; i < remainingMembers.length; i++) {
     const m = remainingMembers[i];
-    const center = direction === 'vertical' ? m.y + m.height / 2 : m.x + m.width / 2;
+    const b = footprintOf?.(m);
+    const center =
+      direction === 'vertical'
+        ? m.y + (b ? (b.top + b.bottom) / 2 : m.height / 2)
+        : m.x + (b ? (b.left + b.right) / 2 : m.width / 2);
     if (pos < center) return i;
   }
   return remainingMembers.length;
