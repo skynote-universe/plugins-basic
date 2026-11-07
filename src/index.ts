@@ -13,3 +13,4 @@ export * from './nodes/image';
 export * from './layout/branch-connectors';
 export * from './layout/stack-layout';
 export * from './interactions';
+export * from './navigation/minimap';
