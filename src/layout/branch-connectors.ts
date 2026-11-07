@@ -70,7 +70,7 @@ export function branchMemberOf(connectorId: string): string | undefined {
 export type BranchWriteScope = 'branch' | 'line';
 
 /** 这些字段变化会改变成员关系或分支设置 (沿子树继承)，需要重算该节点及其后代 */
-const BRANCH_FIELDS: ReadonlySet<string> = new Set(['layout', 'layoutItem', 'parentId', 'zIndex']);
+const BRANCH_FIELDS: ReadonlySet<string> = new Set(['layout', 'layoutItem', 'layoutState', 'parentId', 'zIndex']);
 /** 沿子树向下继承的样式项 */
 const INHERITED_STYLE_KEYS = ['stroke', 'strokeWidth', 'strokeDashArray'] as const;
 /** 布局未注册或未给出规格时：浮动端直线 */
@@ -269,7 +269,9 @@ class BranchConnectorSource implements DerivedConnectorSource {
     let tree = trees.get(rootId);
     if (!tree) {
       const root = this.getNode(rootId)!;
-      tree = buildLayoutTree(root, this.childrenOf, this.ctx.layouts.get(root.layout!.type));
+      tree = buildLayoutTree(root, this.childrenOf, this.ctx.layouts.get(root.layout!.type), undefined, {
+        visibleOnly: true
+      });
       trees.set(rootId, tree);
     }
     return tree.get(id);

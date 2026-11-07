@@ -140,6 +140,11 @@ export class ConnectorEditPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   onPointerMove(e: CanvasPointerEvent): void {
+    if (!this.drag && e.isClaimed) {
+      this.setHover(null);
+      this.handleCursorSet = false;
+      return;
+    }
     if (this.ctx.session.isReadOnly) {
       this.setHover(null);
       if (this.handleCursorSet) this.ctx.host.setCursor('default');
@@ -148,7 +153,7 @@ export class ConnectorEditPlugin implements SkyNotePlugin, PointerHooks {
     }
     const { drag, ctx } = this;
     if (!drag) {
-      if (this.pointerPressed || e.isClaimed) return;
+      if (this.pointerPressed) return;
       // 被上层节点盖住的连线不高亮 (点下去选中的是节点)
       const top = ctx.hitTest(e.point);
       const connector = top?.kind === 'connector' ? top.connector : null;

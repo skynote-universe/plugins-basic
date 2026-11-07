@@ -75,7 +75,7 @@ export class SelectionOutlinePlugin implements SkyNotePlugin, PointerHooks {
   }
 
   onPointerMove(e: CanvasPointerEvent): void {
-    this.hoverPoint = e.point;
+    this.hoverPoint = e.isClaimed ? null : e.point;
     this.deepHover = e.modifiers.ctrl || e.modifiers.meta;
     this.refreshHover();
   }

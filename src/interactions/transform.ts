@@ -880,13 +880,17 @@ export class TransformPlugin implements SkyNotePlugin, PointerHooks {
 
   /** 悬停在控制柄上时显示对应光标 (缩放光标精确对准控制柄方向，随外框旋转)，离开时复位 */
   private updateHoverCursor(e: CanvasPointerEvent): void {
+    if (e.isClaimed) {
+      this.hoverCursorSet = false;
+      return;
+    }
     if (this.ctx.session.isReadOnly) {
       if (this.hoverCursorSet) this.ctx.host.setCursor('default');
       this.hoverCursorSet = false;
       return;
     }
     const selection = this.selection;
-    const hit = selection && !e.isClaimed ? this.hitHandle(selection, e.point) : null;
+    const hit = selection ? this.hitHandle(selection, e.point) : null;
     if (!selection || !hit) {
       if (this.hoverCursorSet) this.ctx.host.setCursor('default');
       this.hoverCursorSet = false;
