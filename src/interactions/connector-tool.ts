@@ -375,6 +375,7 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
     if (
       !node ||
       !definition?.createContent ||
+      definition?.quickConnect === false ||
       node.locked ||
       session.isReadOnly ||
       this.active ||

@@ -459,6 +459,25 @@ describe('编辑快捷键', () => {
 });
 
 describe('选中框', () => {
+  it('单节点块级选区隐藏整节点外框，清空块选区恢复且不影响其他节点', () => {
+    const { engine, overlay } = setup();
+    engine.session.setSelection({ nodeIds: ['a'] });
+    expect(overlay.has('selection:outline')).toBe(true);
+    engine.session.setSelectedTextBlocks({ nodeId: 'a', blockIds: ['body'] });
+    expect(engine.session.selectedNodeIds.has('a')).toBe(true);
+    expect(overlay.has('selection:outline')).toBe(false);
+    engine.session.setViewport({ zoom: 2 });
+    expect(overlay.has('selection:outline')).toBe(false);
+    engine.session.setSelectedTextBlocks(null);
+    expect(overlay.has('selection:outline')).toBe(true);
+    engine.session.setSelectedTextBlocks({ nodeId: 'a', blockIds: [] });
+    expect(overlay.has('selection:outline')).toBe(true);
+    engine.session.setSelection({ nodeIds: ['b'] });
+    engine.session.setSelectedTextBlocks({ nodeId: 'a', blockIds: ['body'] });
+    expect(overlay.has('selection:outline')).toBe(true);
+    engine.destroy();
+  });
+
   it('沿每个选中节点的真实外框绘制，线宽按缩放换算；选中节点移动时跟随，清空选区即清除', () => {
     const { engine, store, overlay } = setup();
     store.updateNode('frame', { rotation: 90 }, { undoable: false });

@@ -219,7 +219,9 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     this.ctx = ctx;
     ctx.registerPointerHooks(this, TEXT_EDIT_PRIORITY);
     // 其他插件 (如导图新建主题) 请求立即输入：进入该节点第一个文字块的编辑并全选，接着输入即替换
-    this.releaseEditRequests = ctx.session.onTextEditRequest((nodeId) => this.enterNodeSelectingAll(nodeId));
+    this.releaseEditRequests = ctx.session.onTextEditRequest((nodeId, blockId) =>
+      this.enterNodeSelectingAll(nodeId, blockId)
+    );
     ctx.onSessionChange((change) => this.onSessionChange(change));
     ctx.onDocumentChange((changes) => this.onDocumentChange(changes));
   }
@@ -455,19 +457,22 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     if (blocks.length === 0 || !toWorld || !fonts) return false;
     const local = applyMatrix(invertMatrix(toWorld), point.x, point.y);
     // 文字框的实际范围：未限定宽高的 (如自适应文本、画框标题) 按排版结果
-    const contains = (p: TextPrimitive): boolean => {
+    const contains = (p: TextPrimitive, pad = 0): boolean => {
       const layout =
         p.width === undefined || p.height === undefined
           ? layoutText(p.runs, p.style, { width: p.width, height: p.height }, fonts)
           : null;
       const width = p.width ?? layout!.width;
       const height = p.height ?? layout!.height;
-      return local.x >= p.x && local.y >= p.y && local.x <= p.x + width && local.y <= p.y + height;
+      return (
+        local.x >= p.x - pad && local.y >= p.y - pad && local.x <= p.x + width + pad && local.y <= p.y + height + pad
+      );
     };
     const primitive =
-      blocks.find(contains) ??
-      // 没点中文字时取框内的第一个文字块 (如点在便签内边距上)；框外的文字 (画框标题) 须点中才编辑
-      blocks.find((p) => p.x >= 0 && p.y >= 0);
+      blocks.find((p) => contains(p, 0)) ??
+      blocks.find((p) => contains(p, 8)) ??
+      // 没点中文字时取框内的第一个文字块 (如点在便签内边距上)；多文字块节点 (如表格) 须点中对应块，不随意回退到第一块
+      (blocks.length === 1 ? blocks.find((p) => p.x >= 0 && p.y >= 0) : undefined);
     if (!primitive) return false;
     this.ctx.session.setSelection({ nodeIds: [node.id], connectorIds: [] });
     const block = node.textBlocks!.find((b) => b.id === primitive.id)!;
@@ -476,12 +481,15 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   /** 按请求进入节点编辑：优先取框内的第一个文字块 (没有时取框外的，如画框标题) 并全选 */
-  private enterNodeSelectingAll(nodeId: string): void {
+  private enterNodeSelectingAll(nodeId: string, blockId?: string): void {
     if (this.ctx.session.isReadOnly) return;
     const node = this.ctx.document.getNode(nodeId);
     if (!node || node.locked) return;
     const blocks = this.textPrimitives(node);
-    const primitive = blocks.find((p) => p.x >= 0 && p.y >= 0) ?? blocks[0];
+    const primitive =
+      blockId === undefined
+        ? (blocks.find((p) => p.x >= 0 && p.y >= 0) ?? blocks[0])
+        : blocks.find((p) => p.id === blockId);
     if (!primitive) return;
     this.exit();
     this.ctx.session.setSelection({ nodeIds: [node.id], connectorIds: [] });
@@ -662,7 +670,11 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
     // 单行文字 (如画框标题) 与表单输入框一致：Tab 确认并退出编辑，按键继续下传给更低优先级的作用域
-    if (key === 'Tab' && state.slot?.singleLine) {
+    const node = state.kind === 'node' ? this.ctx.document.getNode(state.id) : undefined;
+    if (
+      key === 'Tab' &&
+      (state.slot?.singleLine || (node && this.ctx.nodeTypes.get(node.nodeType)?.tabNavigatesTextBlocks))
+    ) {
       this.exit();
       return false;
     }
@@ -968,6 +980,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       ];
     }
     const nodeIds = state ? [state.id] : this.ctx.session.selectedNodeIds;
+    const blockSelection = !state ? this.ctx.session.selectedTextBlocks : null;
     const [start, end] = state ? this.range(state) : [0, Infinity];
     const blocks: FormatBlock[] = [];
     for (const id of nodeIds) {
@@ -976,6 +989,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       const definition = this.ctx.nodeTypes.get(node.nodeType);
       for (const primitive of this.textPrimitives(node)) {
         if (state && primitive.id !== state.blockId) continue;
+        if (blockSelection?.nodeId === id && (!primitive.id || !blockSelection.blockIds.has(primitive.id))) continue;
         const blockIndex = node.textBlocks?.findIndex((b) => b.id === primitive.id) ?? -1;
         if (blockIndex < 0) continue;
         const block = node.textBlocks![blockIndex];
@@ -1014,7 +1028,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
   }
 
   private textPrimitives(node: Readonly<NodeEntity>): TextPrimitive[] {
-    const definition = this.ctx.nodeTypes.get(node.nodeType);
+    const definition = this.ctx.nodeTypes.getValid(node);
     const primitives: CanvasPrimitive[] =
       definition?.compose?.(node as NodeEntity, { theme: this.ctx.session.theme }) ?? [];
     return primitives.filter((p): p is TextPrimitive => p.kind === 'text' && p.id !== undefined);
@@ -1090,9 +1104,17 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
   private isInside(state: EditState, point: Point, geometry: BlockGeometry): boolean {
     const local = applyMatrix(invertMatrix(geometry.toWorld), point.x, point.y);
     const node = state.kind === 'node' ? this.ctx.document.getNode(state.id)! : null;
-    if (node && local.x >= 0 && local.y >= 0 && local.x <= node.width && local.y <= node.height) return true;
+    const isMultiBlock = (node?.textBlocks?.length ?? 0) > 1;
+    if (node && !isMultiBlock && local.x >= 0 && local.y >= 0 && local.x <= node.width && local.y <= node.height)
+      return true;
     const bounds = editingTextBounds(geometry.primitive, geometry.layout);
-    return local.x >= bounds.left && local.y >= bounds.top && local.x <= bounds.right && local.y <= bounds.bottom;
+    const pad = isMultiBlock ? 8 : 0;
+    return (
+      local.x >= bounds.left - pad &&
+      local.y >= bounds.top - pad &&
+      local.x <= bounds.right + pad &&
+      local.y <= bounds.bottom + pad
+    );
   }
 
   private range(state: EditState): [number, number] {
@@ -1208,7 +1230,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     const { state } = this;
     if (!state) {
       // 未编辑时格式目标是选中节点
-      if (change.toggledNodeIds.size > 0) this.emit();
+      if (change.toggledNodeIds.size > 0 || change.selectionScopeChanged) this.emit();
       return;
     }
     const { session } = this.ctx;

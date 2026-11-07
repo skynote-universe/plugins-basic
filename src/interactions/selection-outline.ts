@@ -288,6 +288,14 @@ export class SelectionOutlinePlugin implements SkyNotePlugin, PointerHooks {
       count++;
     };
     for (const id of session.selectedNodeIds) {
+      // 块级选区（如表格单元格）自行展示范围，整节点外框让位于内部选区。
+      if (
+        session.selectedNodeIds.size === 1 &&
+        session.selectedConnectorIds.size === 0 &&
+        session.selectedTextBlocks?.nodeId === id &&
+        session.selectedTextBlocks.blockIds.size > 0
+      )
+        continue;
       if (session.selectedSubtreeNodeIds.has(id)) {
         const b = this.ctx.document.selectionGeometry.getSubtreeBounds(id);
         if (b) {

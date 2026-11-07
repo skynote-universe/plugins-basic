@@ -338,6 +338,28 @@ describe('快速连接', () => {
     engine.destroy();
   });
 
+  it('声明 quickConnect: false 的节点类型不显示四边快捷连接「+」', () => {
+    const { engine, store, host } = setup();
+    engine.use({
+      id: 'test-no-plus',
+      name: '测试插件',
+      version: '0.1.0',
+      install(ctx) {
+        ctx.registerNodeType({
+          type: 'no-plus',
+          label: '无快捷连接',
+          defaultData: {},
+          quickConnect: false,
+          createContent: () => ({ width: 100, height: 100 })
+        });
+      }
+    });
+    store.createNode({ id: 'np1', nodeType: 'no-plus', x: 200, y: 200, width: 100, height: 100 });
+    engine.session.setSelection({ nodeIds: ['np1'] });
+    expect(host.sessions.has('connector-tool:plus')).toBe(false);
+    engine.destroy();
+  });
+
   it('选中单个节点时四边出现「+」；单击右侧「+」在右边新建同类节点并连线，一步撤销', () => {
     const { engine, store, host } = setup();
     store.updateNode('a', { style: { fill: '$red' } });
