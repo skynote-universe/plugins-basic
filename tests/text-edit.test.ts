@@ -753,3 +753,50 @@ describe('段落对齐与格式目标', () => {
     expect(store.getNode('f3')!.textBlocks![0].runs).toEqual([{ text: 'A B', fontWeight: 'bold' }]);
   });
 });
+
+it('未实现单块查询的节点选择多个文字块时，每个目标只提交一次格式补丁', () => {
+  const { engine, plugin, store } = setup();
+  engine.nodeTypes.register({
+    type: 'multi-text',
+    label: '多块',
+    defaultData: {},
+    createContent: () => ({
+      width: 100,
+      height: 80,
+      textBlocks: [
+        { id: 'a', runs: [{ text: '甲' }] },
+        { id: 'b', runs: [{ text: '乙' }] },
+        { id: 'c', runs: [{ text: '丙' }] }
+      ]
+    }),
+    compose: (node) =>
+      (node.textBlocks ?? []).map((block, index) => ({
+        kind: 'text' as const,
+        id: block.id,
+        x: 0,
+        y: index * 20,
+        width: 100,
+        height: 20,
+        runs: block.runs,
+        style: { fontSize: 14 }
+      }))
+  });
+  try {
+    const id = store.createNode({ nodeType: 'multi-text', x: 0, y: 0 })!;
+    engine.session.setSelection({ nodeIds: [id] });
+    engine.session.setSelectedTextBlocks({ nodeId: id, blockIds: ['a', 'b'] });
+    const commit = vi.spyOn(store, 'commit');
+    plugin.toggleFormat('bold');
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(commit.mock.calls[0][0].patches).toHaveLength(2);
+    expect(store.getNode(id)!.textBlocks!.map((block) => block.runs)).toEqual([
+      [{ text: '甲', fontWeight: 'bold' }],
+      [{ text: '乙', fontWeight: 'bold' }],
+      [{ text: '丙' }]
+    ]);
+    store.undo();
+    expect(store.getNode(id)!.textBlocks![0].runs).toEqual([{ text: '甲' }]);
+  } finally {
+    engine.destroy();
+  }
+});

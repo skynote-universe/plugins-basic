@@ -485,7 +485,7 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     if (this.ctx.session.isReadOnly) return;
     const node = this.ctx.document.getNode(nodeId);
     if (!node || node.locked) return;
-    const blocks = this.textPrimitives(node);
+    const blocks = this.textPrimitives(node, blockId);
     const primitive =
       blockId === undefined
         ? (blocks.find((p) => p.x >= 0 && p.y >= 0) ?? blocks[0])
@@ -987,10 +987,15 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       const node = this.ctx.document.getNode(id);
       if (!node || (!state && node.locked)) continue;
       const definition = this.ctx.nodeTypes.get(node.nodeType);
-      for (const primitive of this.textPrimitives(node)) {
+      const primitives = state
+        ? this.textPrimitives(node, state.blockId)
+        : blockSelection?.nodeId === id && definition?.composeTextBlock
+          ? [...blockSelection.blockIds].flatMap((blockId) => this.textPrimitives(node, blockId))
+          : this.textPrimitives(node);
+      for (const primitive of primitives) {
         if (state && primitive.id !== state.blockId) continue;
         if (blockSelection?.nodeId === id && (!primitive.id || !blockSelection.blockIds.has(primitive.id))) continue;
-        const blockIndex = node.textBlocks?.findIndex((b) => b.id === primitive.id) ?? -1;
+        const blockIndex = node.textBlocks && primitive.id ? this.blockIndex(node.textBlocks, primitive.id) : -1;
         if (blockIndex < 0) continue;
         const block = node.textBlocks![blockIndex];
         // 插件声明为纯文本的插槽由节点类型固定外观，不作为格式目标。
@@ -1027,15 +1032,32 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     return this.ctx.document.fonts!;
   }
 
-  private textPrimitives(node: Readonly<NodeEntity>): TextPrimitive[] {
+  private readonly blockIndices = new WeakMap<readonly TextBlock[], Map<string, number>>();
+
+  private blockIndex(blocks: readonly TextBlock[], id: string): number {
+    const cached = this.blockIndices.get(blocks);
+    const index = cached?.get(id);
+    if (index !== undefined && blocks[index]?.id === id) return index;
+    const indices = new Map(blocks.map((block, at) => [block.id, at]));
+    this.blockIndices.set(blocks, indices);
+    return indices.get(id) ?? -1;
+  }
+
+  private textPrimitives(node: Readonly<NodeEntity>, blockId?: string): TextPrimitive[] {
     const definition = this.ctx.nodeTypes.getValid(node);
+    if (blockId !== undefined && definition?.composeTextBlock) {
+      const primitive = definition.composeTextBlock(node as NodeEntity, { theme: this.ctx.session.theme }, blockId);
+      return primitive ? [primitive] : [];
+    }
     const primitives: CanvasPrimitive[] =
       definition?.compose?.(node as NodeEntity, { theme: this.ctx.session.theme }) ?? [];
-    return primitives.filter((p): p is TextPrimitive => p.kind === 'text' && p.id !== undefined);
+    return primitives.filter(
+      (p): p is TextPrimitive => p.kind === 'text' && p.id !== undefined && (blockId === undefined || p.id === blockId)
+    );
   }
 
   /** 实体上的文字：节点按节点类型的 compose 生成 (节点局部坐标)；连线取路由一并排版的文字 (世界坐标) */
-  private ownerText(kind: TextOwnerKind, id: string): OwnerText | null {
+  private ownerText(kind: TextOwnerKind, id: string, blockId: string): OwnerText | null {
     const { document, connectors, entities } = this.ctx;
     if (kind === 'connector') {
       const connector = document.getConnector(id);
@@ -1050,15 +1072,15 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
     const node = document.getNode(id);
     const toWorld = entities.getWorldTransform(id);
     if (!node?.textBlocks || !toWorld) return null;
-    return { blocks: node.textBlocks, primitives: this.textPrimitives(node), toWorld };
+    return { blocks: node.textBlocks, primitives: this.textPrimitives(node, blockId), toWorld };
   }
 
   /** 编辑块的当前几何 (每次按最新文档计算：文字、尺寸或位置随时可能被撤销、协同改变) */
   private geometry(state: EditState): BlockGeometry | null {
-    const owner = this.ownerText(state.kind, state.id);
+    const owner = this.ownerText(state.kind, state.id, state.blockId);
     const fonts = this.ctx.document.fonts;
     const raw = owner?.primitives.find((p) => p.id === state.blockId);
-    const blockIndex = owner?.blocks.findIndex((b) => b.id === state.blockId) ?? -1;
+    const blockIndex = owner ? this.blockIndex(owner.blocks, state.blockId) : -1;
     if (!owner || !fonts || !raw || blockIndex < 0) return null;
     const { toWorld } = owner;
     const primitive = editingTextPrimitive(raw, this.editingTarget(state));
