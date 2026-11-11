@@ -4,6 +4,8 @@
 
 SkyNote 官方基础节点与交互插件。每个能力都是独立插件，只依赖内核公开协议，可按需装配，也是编写第三方插件的参考实现。
 
+[快速开始](https://docs.skynote.top/guide/getting-started) · [API 参考](https://docs.skynote.top/api/plugins-basic) · [演练场](https://playground.skynote.top/)
+
 ## 内容
 
 **节点类型** (由 `BasicNodesPlugin` 一次注册)
@@ -31,13 +33,15 @@ SkyNote 官方基础节点与交互插件。每个能力都是独立插件，只
 
 ## 安装
 
+首个公开版本为 `0.1.0-beta.1`。通过 npm 的 `beta` 标签安装。
+
 ```bash
-npm i @skynote/plugins-basic
+npm install @skynote/plugins-basic@beta @skynote/core@beta
 ```
 
 ## 使用
 
-[@skynote/editor](https://github.com/skynote-universe/editor) 已装配常用基础节点与交互，一般无需直接使用本包。小地图为按需插件。自行装配时：
+[@skynote/editor](https://docs.skynote.top/api/editor) 已装配常用基础节点与交互，一般无需直接使用本包。小地图为按需插件。自行装配时：
 
 ```ts
 import { SkyNoteEngine } from '@skynote/core';
@@ -77,11 +81,11 @@ const snapshot = minimap.getSnapshot({ width: 224, height: 144 });
 
 | 包 | 说明 |
 | --- | --- |
-| [@skynote/core](https://github.com/skynote-universe/core) | 平台中立内核：文档模型、事务与撤销、插件协议 |
-| [@skynote/renderer-leafer](https://github.com/skynote-universe/renderer-leafer) | 基于 LeaferJS 的渲染器 |
+| [@skynote/core](https://docs.skynote.top/api/core) | 平台中立内核：文档模型、事务与撤销、插件协议 |
+| [@skynote/renderer-leafer](https://docs.skynote.top/api/renderer-leafer) | 基于 LeaferJS 的渲染器 |
 | **@skynote/plugins-basic** | 基础节点与交互插件 (本包) |
-| [@skynote/editor](https://github.com/skynote-universe/editor) | 开箱即用的编辑器 |
-| [web](https://github.com/skynote-universe/web) | 官方示例应用 (Vue 3) |
+| [@skynote/editor](https://docs.skynote.top/api/editor) | 开箱即用的编辑器 |
+| [SkyNote Web](https://canvas.skynote.top/) | 官方示例应用 (Vue 3) |
 
 ## 许可证
 
