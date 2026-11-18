@@ -257,4 +257,96 @@ describe('ADR-145 组合 (Group) 交互行为', () => {
     expect(store.getNode('a')).toMatchObject({ x: 0, y: 0, width: 200, height: 80 });
     expect(store.getNode('b')).toMatchObject({ x: 300, y: 0, width: 200, height: 80 });
   });
+
+  it('画框内的组合缝隙悬停、单击选中并整体拖拽时优先命中组合，按住 Ctrl 仍可穿透选中画框', () => {
+    const { engine, store, host } = setup();
+    const frameId = store.createNode({
+      nodeType: 'frame',
+      x: 50,
+      y: 50,
+      width: 400,
+      height: 260,
+      options: { title: '容器' }
+    })!;
+    const groupId = store.groupNodes(['a', 'b'])!;
+    store.reparentNodes([groupId], frameId);
+
+    // 悬停在组合缝隙 (225, 140) 上，背后是画框：悬停高亮应指向组合而非画框
+    pointer(engine, 'move', { x: 225, y: 140 });
+    const hover = host.sessions.get('selection:hover');
+    expect(hover?.primitives[0]).toMatchObject({
+      kind: 'polygon',
+      points: [100, 100, 350, 100, 350, 180, 100, 180]
+    });
+
+    // 单击组合缝隙应选中组合，而非画框
+    pointer(engine, 'down', { x: 225, y: 140 });
+    pointer(engine, 'up', { x: 225, y: 140 });
+    expect([...engine.session.selectedNodeIds]).toEqual([groupId]);
+
+    // 选中后从缝隙按住拖拽，应拖动组合而非画框
+    pointer(engine, 'down', { x: 225, y: 140 });
+    pointer(engine, 'move', { x: 245, y: 160 }, { ctrl: true });
+    pointer(engine, 'up', { x: 245, y: 160 });
+    expect(store.getNode(frameId)).toMatchObject({ x: 50, y: 50 });
+    expect(store.getNode(groupId)).toMatchObject({ x: 70, y: 70 });
+
+    // 按住 Ctrl/Cmd 点击组合缝隙，应穿透选中背后的画框
+    pointer(engine, 'down', { x: 245, y: 160 }, { ctrl: true });
+    pointer(engine, 'up', { x: 245, y: 160 }, { ctrl: true });
+    expect([...engine.session.selectedNodeIds]).toEqual([frameId]);
+  });
+
+  it('画框内的可整选布局子树缝隙单击与拖拽优先命中子树而非画框', () => {
+    const { engine, store, host } = setup();
+    const frameId = store.createNode({
+      nodeType: 'frame',
+      x: 50,
+      y: 50,
+      width: 500,
+      height: 320,
+      options: { title: '容器' }
+    })!;
+    engine.layouts.register({
+      id: 'test-tree',
+      label: '测试树',
+      selectableSubtree: true,
+      arrange: () => new Map()
+    });
+    const rootId = store.createNode({
+      nodeType: 'shape',
+      x: 100,
+      y: 100,
+      width: 80,
+      height: 40,
+      parentId: frameId
+    })!;
+    store.updateNode(rootId, { layout: { type: 'test-tree', options: {} } });
+    const childId = store.createNode({
+      nodeType: 'shape',
+      x: 240,
+      y: 160,
+      width: 80,
+      height: 40,
+      parentId: rootId
+    })!;
+    store.updateNode(childId, { layoutItem: {} });
+
+    // 悬停在子树缝隙 (250, 190)：应显示子树悬停框
+    pointer(engine, 'move', { x: 250, y: 190 });
+    expect(host.sessions.get('selection:subtree-hover')).toBeDefined();
+
+    // 单击子树缝隙：应选中子树根，而不是背后的画框
+    pointer(engine, 'down', { x: 250, y: 190 });
+    pointer(engine, 'up', { x: 250, y: 190 });
+    expect([...engine.session.selectedNodeIds]).toEqual([rootId]);
+    expect([...engine.session.selectedSubtreeNodeIds]).toEqual([rootId]);
+
+    // 从子树缝隙拖拽：应移动子树，画框保持不动
+    pointer(engine, 'down', { x: 250, y: 190 });
+    pointer(engine, 'move', { x: 270, y: 210 }, { ctrl: true });
+    pointer(engine, 'up', { x: 270, y: 210 });
+    expect(store.getNode(frameId)).toMatchObject({ x: 50, y: 50 });
+    expect(store.getNode(rootId)).toMatchObject({ x: 120, y: 120 });
+  });
 });

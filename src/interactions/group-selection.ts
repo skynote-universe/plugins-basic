@@ -3,7 +3,13 @@
  * @description 组合 (Group) 选区归并、双击逐层下钻与 Escape 退回上层纯函数 (ADR-145)
  */
 
-import { GROUP_NODE_TYPE, type CanvasPluginContext, type Point } from '@skynote/core';
+import {
+  GROUP_NODE_TYPE,
+  compareHierarchicalNodes,
+  type CanvasPluginContext,
+  type NodeEntity,
+  type Point
+} from '@skynote/core';
 
 /** 真实实体未命中后才查询编组空隙，复用空间索引，避免指针移动时扫描全部节点。 */
 export function hitGroupBounds(ctx: CanvasPluginContext, point: Point): string | undefined {
@@ -98,4 +104,71 @@ export function resolveParentGroupId(ctx: CanvasPluginContext): string | null {
     else if (sharedParentGroupId !== parent.id) return null;
   }
   return sharedParentGroupId;
+}
+
+export interface GapTargetResolution {
+  id: string;
+  subtree?: boolean;
+}
+
+/**
+ * 缝隙命中裁决：当指针落在脑图或组合的缝隙中（即使背后垫有画框等容器）时，
+ * 若命中的脑图子树或组合位于真实命中节点之上（含其后代），优先选中该脑图或组合。
+ */
+export function resolveGapTarget(
+  ctx: CanvasPluginContext,
+  point: Point,
+  hitNode: Readonly<NodeEntity> | undefined,
+  options?: ResolveGroupTargetOptions & { tolerance?: number }
+): GapTargetResolution | null {
+  if (options?.deep) return hitNode ? { id: hitNode.id } : null;
+
+  const getNode = (id: string): Readonly<NodeEntity> | undefined => ctx.entities.getNode(id)?.entity;
+  const subtreeId = ctx.document.selectionGeometry.hitTestSubtree(
+    point,
+    options?.tolerance ?? 4 / ctx.session.viewport.zoom
+  );
+  const groupId = hitGroupBounds(ctx, point);
+
+  let candidate: GapTargetResolution | undefined;
+  if (subtreeId !== undefined && groupId !== undefined) {
+    const subtreeNode = getNode(subtreeId);
+    const groupNode = getNode(groupId);
+    if (subtreeNode && groupNode && compareHierarchicalNodes(subtreeNode, groupNode, getNode) >= 0) {
+      const resolved = resolveGroupTarget(ctx, subtreeId, { drillDown: options?.drillDown });
+      candidate = resolved === subtreeId ? { id: subtreeId, subtree: true } : { id: resolved };
+    } else {
+      candidate = { id: groupId };
+    }
+  } else if (subtreeId !== undefined) {
+    const resolved = resolveGroupTarget(ctx, subtreeId, { drillDown: options?.drillDown });
+    candidate = resolved === subtreeId ? { id: subtreeId, subtree: true } : { id: resolved };
+  } else if (groupId !== undefined) {
+    candidate = { id: groupId };
+  }
+
+  if (candidate) {
+    if (!hitNode) return candidate;
+    const candidateNode = getNode(candidate.id);
+    if (candidateNode && compareHierarchicalNodes(candidateNode, hitNode, getNode) > 0) {
+      return candidate;
+    }
+  }
+
+  return hitNode ? { id: resolveGroupTarget(ctx, hitNode.id, { drillDown: options?.drillDown }) } : null;
+}
+
+/** 当前选中节点均位于命中节点之上（如已选脑图/组合垫在画框上方）时，允许从缝隙整体拖拽选区。 */
+export function isSelectionAboveNode(ctx: CanvasPluginContext, hitNode: Readonly<NodeEntity>): boolean {
+  const { selectedNodeIds } = ctx.session;
+  if (selectedNodeIds.size === 0 || selectedNodeIds.has(hitNode.id)) return false;
+  const getNode = (id: string): Readonly<NodeEntity> | undefined => ctx.entities.getNode(id)?.entity;
+  let hasAbove = false;
+  for (const id of selectedNodeIds) {
+    const selected = getNode(id);
+    if (!selected) continue;
+    if (compareHierarchicalNodes(selected, hitNode, getNode) <= 0) return false;
+    hasAbove = true;
+  }
+  return hasAbove;
 }

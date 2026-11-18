@@ -28,7 +28,7 @@ import {
   type TextEditingTarget
 } from '@skynote/core';
 
-import { resolveGroupTarget, hitGroupBounds } from './group-selection';
+import { resolveGapTarget } from './group-selection';
 
 export const SELECTION_OUTLINE_PLUGIN_ID = '@skynote/plugins-basic/selection-outline';
 const OUTLINE_SESSION = 'selection:outline';
@@ -147,18 +147,21 @@ export class SelectionOutlinePlugin implements SkyNotePlugin, PointerHooks {
     const hit = ctx.hitTest(hoverPoint);
     const raw = hit?.kind === 'node' ? hit.node : undefined;
     let rootId: string | null = null;
-    if (raw) rootId = this.subtreeRootOf(raw.id);
-    else if (hit?.kind === 'connector') {
+    let targetId: string | null = null;
+    if (hit?.kind === 'connector') {
       const { from, to } = hit.connector;
       const fromRoot = from.nodeId === undefined ? null : this.subtreeRootOf(from.nodeId);
       const toRoot = to.nodeId === undefined ? null : this.subtreeRootOf(to.nodeId);
       if (fromRoot === toRoot) rootId = fromRoot;
-    } else rootId = ctx.document.selectionGeometry.hitTestSubtree(hoverPoint, 4 / ctx.session.viewport.zoom) ?? null;
-    const targetId = raw
-      ? resolveGroupTarget(ctx, raw.id, { deep: this.deepHover })
-      : !hit && !this.deepHover
-        ? hitGroupBounds(ctx, hoverPoint)
-        : null;
+    } else {
+      const gapTarget = resolveGapTarget(ctx, hoverPoint, raw, { deep: this.deepHover });
+      if (gapTarget?.subtree) {
+        rootId = gapTarget.id;
+      } else {
+        targetId = gapTarget?.id ?? null;
+        if (raw) rootId = this.subtreeRootOf(raw.id);
+      }
+    }
     const node = targetId ? ctx.entities.getNode(targetId)?.entity : undefined;
     const memberSelected =
       node && [...ctx.session.selectedNodeIds].some((id) => ctx.entities.getAncestorIds(id).includes(node.id));

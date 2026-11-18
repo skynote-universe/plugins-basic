@@ -25,11 +25,13 @@
 import {
   applyMatrix,
   boundsFromPoints,
+  commitContainerDrop,
   generateId,
   generateNKeysBetween,
   invertMatrix,
   sortSiblingsByLayer,
   unionBounds,
+  updateContainerDropTarget,
   type CanvasPluginContext,
   type CanvasPointerEvent,
   type Point,
@@ -38,15 +40,13 @@ import {
   type SkyNotePlugin
 } from '@skynote/core';
 import { SNAP_THRESHOLD_PX, collectSnapTargets, drawSnapGuides, type SnapTargets } from './snapping';
-import { resolveGroupTarget, hitGroupBounds } from './group-selection';
+import { isSelectionAboveNode, resolveGapTarget } from './group-selection';
 import { canAcceptLayoutChildren, isInstalledLayoutMember, isStackLayoutMember } from '../layout/layout-membership';
 import { STACK_LAYOUT_ID, computeStackInsertIndex } from '../layout/stack-layout';
 
 export const SELECTION_PLUGIN_ID = '@skynote/plugins-basic/selection';
 const MARQUEE_SESSION = 'selection:marquee';
 const DROP_TARGET_SESSION = 'selection:drop-target';
-/** 拖放目标高亮的屏幕线宽 */
-const DROP_TARGET_STROKE_PX = 2;
 /** 超过该屏幕距离才视为拖拽 */
 const DRAG_THRESHOLD_PX = 3;
 
@@ -124,24 +124,21 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
     const hit = this.ctx.hitTest(e.point);
     const deep = e.modifiers.ctrl || e.modifiers.meta;
     const drillDown = e.clickCount === 2 && !e.modifiers.shift && !deep;
-    let target: PressTarget | null =
+    const hitNode = hit?.kind === 'connector' ? undefined : (e.target ?? undefined);
+    const resolved =
       hit?.kind === 'connector'
-        ? { kind: 'connector', id: hit.connector.id }
-        : e.target
-          ? { kind: 'node', id: resolveGroupTarget(this.ctx, e.target.id, { deep, drillDown }) }
-          : null;
-    if (!target && !deep && !e.modifiers.shift && this.hitSelectionBlank(e.point)) {
+        ? { kind: 'connector' as const, id: hit.connector.id }
+        : resolveGapTarget(this.ctx, e.point, hitNode, { deep, drillDown });
+    const target: PressTarget | null =
+      resolved && 'kind' in resolved ? resolved : resolved ? { kind: 'node', ...resolved } : null;
+    if (
+      !deep &&
+      !e.modifiers.shift &&
+      (!hitNode || isSelectionAboveNode(this.ctx, hitNode)) &&
+      (!target || (hitNode && target.id === hitNode.id)) &&
+      this.hitSelectionBlank(e.point)
+    ) {
       this.startPress(null, e, false);
-    } else if (!target && !deep) {
-      const id = this.ctx.document.selectionGeometry.hitTestSubtree(e.point, 4 / this.ctx.session.viewport.zoom);
-      if (id) target = { kind: 'node', id, subtree: true };
-      else {
-        const groupId = hitGroupBounds(this.ctx, e.point);
-        if (groupId) target = { kind: 'node', id: groupId };
-      }
-    }
-    if (this.gesture) {
-      // 多选框空白处已认领为整体移动，保持当前范围。
     } else if (target) {
       this.press(target, e);
     } else {
@@ -441,40 +438,9 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
 
   /** 指针所在的最上层可接收容器 (不含被拖节点及其后代)，并高亮其外框 */
   private updateDropTarget(draggedIds: readonly string[], point: Point): string | undefined {
-    const { ctx } = this;
-    const dragged = new Set(draggedIds);
-    const target = ctx.hitTestNode(
-      point,
-      (node) =>
-        (!!ctx.nodeTypes.get(node.nodeType)?.acceptsChildren || canAcceptLayoutChildren(ctx, node.id)) &&
-        !dragged.has(node.id) &&
-        !ctx.entities.getAncestorIds(node.id).some((id) => dragged.has(id))
-    );
-    if (!target) {
-      ctx.host.overlay.clear(DROP_TARGET_SESSION);
-      return undefined;
-    }
-    const toWorld = ctx.entities.getWorldTransform(target.id)!;
-    const { theme, viewport } = ctx.session;
-    const corners = [
-      applyMatrix(toWorld, 0, 0),
-      applyMatrix(toWorld, target.width, 0),
-      applyMatrix(toWorld, target.width, target.height),
-      applyMatrix(toWorld, 0, target.height)
-    ];
-    ctx.host.overlay.setPrimitives(
-      DROP_TARGET_SESSION,
-      [
-        {
-          kind: 'polygon',
-          points: corners.flatMap((p) => [p.x, p.y]),
-          stroke: theme.accent,
-          strokeWidth: DROP_TARGET_STROKE_PX / viewport.zoom
-        }
-      ],
-      { transient: true }
-    );
-    return target.id;
+    return updateContainerDropTarget(this.ctx, DROP_TARGET_SESSION, draggedIds, point, {
+      canAccept: (node) => canAcceptLayoutChildren(this.ctx, node.id)
+    });
   }
 
   /** 松手：把被拖的节点改挂到拖放目标 (保持在世界中的位置不变) 或在自动堆叠画框内按落点换序并归位，与本次移动同组撤销 */
@@ -542,36 +508,17 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
       return;
     }
 
-    const ids = [...ctx.session.selectedNodeIds].filter((id) => {
-      const node = ctx.entities.getNode(id)?.entity;
-      if (!node || node.locked || node.parentId === targetId) return false;
-      // 原父节点不接收拖入 (如组合) 时不把子节点拖出
-      const parent = node.parentId === undefined ? undefined : ctx.entities.getNode(node.parentId)?.entity;
-      return !parent || !!ctx.nodeTypes.get(parent.nodeType)?.acceptsChildren;
-    });
-    if (ids.length === 0) return;
+    const ids = [...ctx.session.selectedNodeIds];
     if (targetId === undefined || !canAcceptLayoutChildren(ctx, targetId)) {
-      const label = targetId ? '移入容器' : '移出容器';
-      const leavingLayoutIds = ids.filter((id) => isInstalledLayoutMember(ctx, id));
-      const unmovedLayoutIds = leavingLayoutIds.filter((id) => !isStackLayoutMember(ctx, id));
-      ctx.document.reparentNodes(ids, targetId, { groupId, label });
-      if (leavingLayoutIds.length > 0) {
-        // 自带布局的节点只去掉空的成员标记，保留它给自己布局的根设置 (如整张导图的分支样式)
-        ctx.document.updateNodes(
-          leavingLayoutIds,
-          (node) => (node.layout && Object.keys(node.layoutItem ?? {}).length > 0 ? {} : { layoutItem: undefined }),
-          { groupId, label }
-        );
-        if (unmovedLayoutIds.length > 0 && (moved.x !== 0 || moved.y !== 0)) {
-          ctx.document.moveEntities({ nodeIds: unmovedLayoutIds }, moved, { groupId, label });
-        }
-      }
+      commitContainerDrop(ctx, ids, targetId, {
+        groupId,
+        moved,
+        isLayoutMember: (id) => isInstalledLayoutMember(ctx, id),
+        shouldApplyMovedOnLeave: (id) => !isStackLayoutMember(ctx, id)
+      });
       return;
     }
-    // 加入布局树：改挂并补上成员标记，与本次移动同组撤销
-    ctx.document.reparentNodes(ids, targetId, { groupId, label: '加入布局' });
-    const joining = ids.filter((id) => !ctx.document.getNode(id)?.layoutItem);
-    ctx.document.updateNodes(joining, { layoutItem: {} }, { groupId, label: '加入布局' });
+    commitContainerDrop(ctx, ids, targetId, { groupId, moved });
   }
 
   private finish(pointerId: number): void {
