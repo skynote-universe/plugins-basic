@@ -815,6 +815,31 @@ describe('精确拾取与悬停高亮', () => {
     pointer(engine, 'move', { x: 681, y: 50 });
     expect(overlay.has('selection:hover')).toBe(false);
   });
+
+  it('单选异形节点后点击选区框内空白可保持选区并直接拖动，点框外清空选区且不抢占上层节点', () => {
+    const { engine, store } = setup();
+    // 椭圆 (600, 0, 160x100)：左上角 (608, 8) 在轮廓外但在选区蓝框内
+    store.createNode({ nodeType: 'shape', id: 'e', x: 600, y: 0, options: { geometry: 'ellipse' } });
+    expect(engine.hitTestNode({ x: 608, y: 8 })).toBeUndefined();
+
+    // 先选中椭圆，再从蓝框内空白处 (608, 8) 拖动 (+40, +30)
+    click(engine, { x: 680, y: 50 });
+    expect([...engine.session.selectedNodeIds]).toEqual(['e']);
+    drag(engine, { x: 608, y: 8 }, { x: 648, y: 38 });
+    expect([...engine.session.selectedNodeIds]).toEqual(['e']);
+    expect(store.getNode('e')).toMatchObject({ x: 640, y: 30 });
+
+    // 上层节点盖在椭圆选区空角时，点击该处优先选中上层节点
+    store.createNode({ nodeType: 'shape', id: 'top', x: 642, y: 32, width: 20, height: 20 });
+    click(engine, { x: 650, y: 40 });
+    expect([...engine.session.selectedNodeIds]).toEqual(['top']);
+
+    // 重新单选椭圆，点击框外空白清空选区
+    click(engine, { x: 720, y: 80 });
+    expect([...engine.session.selectedNodeIds]).toEqual(['e']);
+    click(engine, { x: 900, y: 300 });
+    expect(engine.session.selectedNodeIds.size).toBe(0);
+  });
 });
 
 describe('失焦复位', () => {

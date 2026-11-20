@@ -356,9 +356,29 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
     this.startPress(target, e, wasSelected && !e.modifiers.shift);
   }
 
-  /** 仅在真实实体未命中时检查多选框，避免空白拖动抢占节点、连线和控制柄。 */
+  /** 仅在真实实体未命中或选区在命中节点之上时检查选区框内空白，避免空白拖动抢占上层节点、连线和控制柄。 */
   private hitSelectionBlank(point: Point): boolean {
-    const { session, document, spatial } = this.ctx;
+    const { session, document, entities, spatial } = this.ctx;
+    if (session.selectedNodeIds.size === 0) return false;
+    if (session.selectedNodeIds.size === 1 && session.selectedConnectorIds.size === 0) {
+      const [id] = session.selectedNodeIds;
+      if (session.selectedSubtreeNodeIds.has(id)) {
+        const subtreeBounds = document.selectionGeometry.getSubtreeBounds(id);
+        return (
+          !!subtreeBounds &&
+          point.x >= subtreeBounds.left &&
+          point.x <= subtreeBounds.right &&
+          point.y >= subtreeBounds.top &&
+          point.y <= subtreeBounds.bottom
+        );
+      }
+      const entry = entities.getNode(id);
+      if (!entry || entry.entity.locked) return false;
+      const world = entities.getWorldTransform(id);
+      if (!world) return false;
+      const local = applyMatrix(invertMatrix(world), point.x, point.y);
+      return local.x >= 0 && local.x <= entry.entity.width && local.y >= 0 && local.y <= entry.entity.height;
+    }
     if (session.selectedNodeIds.size < 2) return false;
     let bounds: RectBounds | undefined;
     let count = 0;
