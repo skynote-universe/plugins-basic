@@ -121,17 +121,20 @@ export class SelectionPlugin implements SkyNotePlugin, PointerHooks {
 
   onPointerDown(e: CanvasPointerEvent): void {
     if (this.ctx.session.isReadOnly || e.isClaimed || e.button !== 0 || this.gesture) return;
-    const hit = this.ctx.hitTest(e.point);
+    const hit = e.overlayTarget ? undefined : this.ctx.hitTest(e.point);
     const deep = e.modifiers.ctrl || e.modifiers.meta;
     const drillDown = e.clickCount === 2 && !e.modifiers.shift && !deep;
     const hitNode = hit?.kind === 'connector' ? undefined : (e.target ?? undefined);
     const resolved =
       hit?.kind === 'connector'
         ? { kind: 'connector' as const, id: hit.connector.id }
-        : resolveGapTarget(this.ctx, e.point, hitNode, { deep, drillDown });
+        : e.overlayTarget && hitNode
+          ? { id: hitNode.id, subtree: false }
+          : resolveGapTarget(this.ctx, e.point, hitNode, { deep, drillDown });
     const target: PressTarget | null =
       resolved && 'kind' in resolved ? resolved : resolved ? { kind: 'node', ...resolved } : null;
     if (
+      !e.overlayTarget &&
       !deep &&
       !e.modifiers.shift &&
       (!hitNode || isSelectionAboveNode(this.ctx, hitNode)) &&

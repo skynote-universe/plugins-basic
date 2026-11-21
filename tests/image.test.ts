@@ -8,7 +8,14 @@ import {
   parseNodeClipboard
 } from '@skynote/core';
 import type { AssetAdapter, AssetUploadResult } from '@skynote/core';
-import { BasicNodesPlugin, SelectionPlugin, TransformPlugin, ClipboardPlugin } from '../src';
+import {
+  BasicNodesPlugin,
+  SelectionPlugin,
+  TransformPlugin,
+  ClipboardPlugin,
+  insertImageAsset,
+  replaceImageAsset
+} from '../src';
 
 const engines: SkyNoteEngine[] = [];
 afterEach(() => engines.splice(0).forEach((engine) => engine.destroy()));
@@ -31,7 +38,7 @@ async function insert(
   point: { x: number; y: number },
   fit: 'cover' | 'contain' = 'cover'
 ): Promise<string> {
-  const result = await engine.insertImage(file, point, fit);
+  const result = await insertImageAsset(engine, file, point, fit);
   if (result.status !== 'succeeded') throw new Error(JSON.stringify(result));
   return result.value;
 }
@@ -130,7 +137,7 @@ describe('图片事务与交互', () => {
           })
     );
     const id = await insert(engine, 'original', { x: 0, y: 0 });
-    const pending = engine.replaceImage([id], 'next');
+    const pending = replaceImageAsset(engine, [id], 'next');
     engine.documentStore.removeEntities({ nodeIds: [id] });
     expect(await pending).toEqual({ status: 'cancelled', reason: 'target-changed' });
     finish(asset('memory:late'));
@@ -158,7 +165,7 @@ describe('图片事务与交互', () => {
     store.redo();
     store.updateNode(id, { x: 12, rotation: 30, style: { fill: '$red', stroke: '$blue', strokeWidth: 4, opacity: 0 } });
     const before = structuredClone(store.getNode(id)!);
-    await engine.replaceImage([id], 'second');
+    await replaceImageAsset(engine, [id], 'second');
     const replaced = structuredClone(store.getNode(id)!);
     expect(replaced.image!.assetId).not.toBe(firstAssetId);
     expect({ ...replaced, image: before.image }).toEqual(before);
@@ -177,8 +184,8 @@ describe('图片事务与交互', () => {
         : new Promise((resolve) => pending.push({ resolve, signal }))
     );
     const id = await insert(engine, 'initial', { x: 300, y: 300 });
-    const oldTask = engine.replaceImage([id], 'old');
-    const newTask = engine.replaceImage([id], 'new');
+    const oldTask = replaceImageAsset(engine, [id], 'old');
+    const newTask = replaceImageAsset(engine, [id], 'new');
     expect(pending[0].signal.aborted).toBe(true);
     pending[1].resolve(asset('memory:new'));
     expect(await newTask).toMatchObject({ status: 'succeeded' });
@@ -200,7 +207,7 @@ describe('图片事务与交互', () => {
         complete = resolve;
       });
     });
-    const task = engine.insertImage('pending', { x: 0, y: 0 });
+    const task = insertImageAsset(engine, 'pending', { x: 0, y: 0 });
     engine.destroy();
     expect(signal.aborted).toBe(true);
     complete(asset('memory:late'));

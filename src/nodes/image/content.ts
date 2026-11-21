@@ -8,12 +8,16 @@
  */
 
 import type {
+  AssetTaskResult,
   CanvasPrimitive,
+  CreateNodeAssetTaskOptions,
   ImageFit,
   NodeComposeContext,
   NodeCreateContent,
   NodeEntity,
-  NodeTypeDefinition
+  NodeTypeDefinition,
+  Point,
+  UpdateNodesAssetTaskOptions
 } from '@skynote/core';
 import { AssetAdapterError } from '@skynote/core';
 
@@ -107,4 +111,66 @@ export class ImageNodeType implements NodeTypeDefinition {
       }
     ];
   }
+}
+
+export interface ImageAssetTaskHost {
+  createNodeWithAssetTask<T extends string>(options: CreateNodeAssetTaskOptions<T>): Promise<AssetTaskResult<string>>;
+  updateNodesWithAssetTask(options: UpdateNodesAssetTaskOptions): Promise<AssetTaskResult<readonly string[]>>;
+}
+
+/** 经宿主资产适配器上传图片并在同一次可撤销事务中创建图片节点 */
+export function insertImageAsset(
+  host: Pick<ImageAssetTaskHost, 'createNodeWithAssetTask'>,
+  file: unknown,
+  point: Point,
+  fit: ImageFit = 'cover',
+  signal?: AbortSignal
+): Promise<AssetTaskResult<string>> {
+  const position = { ...point };
+  return host.createNodeWithAssetTask({
+    label: '插入图片',
+    signal,
+    prepare: async (upload) => {
+      const meta = await upload({ file, mimePrefix: 'image/' });
+      return {
+        request: {
+          nodeType: 'image',
+          x: position.x,
+          y: position.y,
+          origin: 'center',
+          options: {
+            assetId: meta.id,
+            fit,
+            intrinsicWidth: meta.width ?? 0,
+            intrinsicHeight: meta.height ?? 0
+          },
+          label: '插入图片'
+        },
+        assets: [meta]
+      };
+    }
+  });
+}
+
+/** 上传并原子替换所选图片节点的资产引用，保留几何、样式与各自的显示方式 */
+export function replaceImageAsset(
+  host: Pick<ImageAssetTaskHost, 'updateNodesWithAssetTask'>,
+  nodeIds: readonly string[],
+  file: unknown,
+  signal?: AbortSignal
+): Promise<AssetTaskResult<readonly string[]>> {
+  return host.updateNodesWithAssetTask({
+    nodeIds,
+    label: '替换图片',
+    signal,
+    getTargetSignature: (node) =>
+      node.nodeType === 'image' && typeof node.image?.assetId === 'string' ? node.image.assetId : undefined,
+    prepare: async (upload) => {
+      const meta = await upload({ file, mimePrefix: 'image/' });
+      return {
+        assets: [meta],
+        update: (node) => (node.image ? { image: { ...node.image, assetId: meta.id } } : {})
+      };
+    }
+  });
 }

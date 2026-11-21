@@ -10,6 +10,8 @@ import { ShapeNodeType } from './nodes/shapes';
 import { FrameNodeType } from './nodes/frame';
 import { GroupNodeType } from './nodes/group';
 import { ImageNodeType } from './nodes/image';
+import { VideoNodeType } from './nodes/video';
+import { WebLinkNodeType } from './nodes/web-link';
 import { StackLayoutDefinition } from './layout/stack-layout';
 
 export class BasicNodesPlugin implements SkyNotePlugin {
@@ -24,6 +26,8 @@ export class BasicNodesPlugin implements SkyNotePlugin {
     ctx.registerNodeType(new FrameNodeType());
     ctx.registerNodeType(new GroupNodeType());
     ctx.registerNodeType(new ImageNodeType());
+    ctx.registerNodeType(new VideoNodeType());
+    ctx.registerNodeType(new WebLinkNodeType());
     ctx.registerLayout(new StackLayoutDefinition());
   }
 }

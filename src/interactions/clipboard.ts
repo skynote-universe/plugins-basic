@@ -32,6 +32,7 @@ import {
   type RectBounds,
   type SkyNotePlugin
 } from '@skynote/core';
+import { insertImageAsset } from '../nodes/image';
 
 export const CLIPBOARD_PLUGIN_ID = '@skynote/plugins-basic/clipboard';
 /** 连续粘贴时每份相对上一份的偏移 (世界距离) */
@@ -118,7 +119,7 @@ export class ClipboardPlugin implements SkyNotePlugin, ClipboardHandler, Pointer
         String((file as { type?: unknown }).type).startsWith('image/')
     );
     if (imageFile !== undefined) {
-      void this.ctx.insertImage(imageFile, this.pointer ?? this.ctx.session.viewportCenter);
+      void insertImageAsset(this.ctx, imageFile, this.pointer ?? this.ctx.session.viewportCenter);
       return true;
     }
     const text = data['text/plain']?.trim();

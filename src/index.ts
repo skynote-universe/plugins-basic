@@ -10,6 +10,8 @@ export * from './nodes/shapes';
 export * from './nodes/frame';
 export * from './nodes/group';
 export * from './nodes/image';
+export * from './nodes/video';
+export * from './nodes/web-link';
 export * from './layout/branch-connectors';
 export * from './layout/stack-layout';
 export * from './interactions';
