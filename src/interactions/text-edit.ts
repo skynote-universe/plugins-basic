@@ -449,6 +449,30 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
 
   // ================= 进入与定位 =================
 
+  /**
+   * 定位节点上对应的文字块；若节点来自旧文档尚未实例化该已声明文本槽（如旧视频节点的 title 槽），
+   * 则与本次编辑同组按需补建文字块，避免双击回退标题时报错。
+   */
+  private resolveNodeTextBlock(
+    node: Readonly<NodeEntity>,
+    primitiveId: string | undefined
+  ): { block: TextBlock; groupId?: string } | null {
+    if (!primitiveId) return null;
+    const existing = node.textBlocks?.find((b) => b.id === primitiveId);
+    if (existing) return { block: existing };
+    if (this.ctx.session.isReadOnly || node.locked) return null;
+    const slot = this.ctx.nodeTypes.get(node.nodeType)?.slots?.find((s) => s.slot === primitiveId);
+    if (!slot) return null;
+    const block: TextBlock = { id: primitiveId, slot: slot.slot, runs: [{ text: '' }] };
+    const groupId = generateId('text-edit');
+    this.ctx.document.updateNode(
+      node.id,
+      { textBlocks: [...(node.textBlocks ?? []), block] },
+      { label: '编辑文字', groupId }
+    );
+    return { block, groupId };
+  }
+
   /** 双击节点进入编辑：定位到点中的文字块 (都没点中时取框内的第一个)，光标放在点击处 */
   private enterNode(node: Readonly<NodeEntity>, point: Point): boolean {
     const blocks = this.textPrimitives(node);
@@ -474,9 +498,17 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
       // 没点中文字时取框内的第一个文字块 (如点在便签内边距上)；多文字块节点 (如表格) 须点中对应块，不随意回退到第一块
       (blocks.length === 1 ? blocks.find((p) => p.x >= 0 && p.y >= 0) : undefined);
     if (!primitive) return false;
+    const resolved = this.resolveNodeTextBlock(node, primitive.id);
+    if (!resolved) return false;
     this.ctx.session.setSelection({ nodeIds: [node.id], connectorIds: [] });
-    const block = node.textBlocks!.find((b) => b.id === primitive.id)!;
-    this.start('node', node.id, primitive.id!, findTextSlot(block, this.ctx.nodeTypes.get(node.nodeType)), point);
+    this.start(
+      'node',
+      node.id,
+      resolved.block.id,
+      findTextSlot(resolved.block, this.ctx.nodeTypes.get(node.nodeType)),
+      point,
+      resolved.groupId
+    );
     return true;
   }
 
@@ -492,9 +524,17 @@ export class TextEditPlugin implements SkyNotePlugin, PointerHooks {
         : blocks.find((p) => p.id === blockId);
     if (!primitive) return;
     this.exit();
+    const resolved = this.resolveNodeTextBlock(node, primitive.id);
+    if (!resolved) return;
     this.ctx.session.setSelection({ nodeIds: [node.id], connectorIds: [] });
-    const block = node.textBlocks!.find((b) => b.id === primitive.id)!;
-    this.start('node', node.id, primitive.id!, findTextSlot(block, this.ctx.nodeTypes.get(node.nodeType)), null);
+    this.start(
+      'node',
+      node.id,
+      resolved.block.id,
+      findTextSlot(resolved.block, this.ctx.nodeTypes.get(node.nodeType)),
+      null,
+      resolved.groupId
+    );
   }
 
   /**

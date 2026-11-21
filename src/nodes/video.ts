@@ -1,16 +1,30 @@
 import {
   AssetAdapterError,
+  createTextBlockPrimitive,
+  getPlainText,
+  measureSingleLineHeight,
+  resolveTextBlockStyle,
+  resolveTextPadding,
   type AssetTaskResult,
   type AssetUploader,
   type CanvasAssetMeta,
   type CanvasPrimitive,
   type CreateNodeAssetTaskOptions,
+  type NodeComposeContext,
   type NodeCreateContent,
   type NodeEntity,
   type NodeTypeDefinition,
   type Point,
+  type RectBounds,
+  type TextBlock,
+  type TextPrimitive,
   type UpdateNodesAssetTaskOptions
 } from '@skynote/core';
+
+const TITLE_SLOT = 'title';
+const TITLE_STYLE = { fontSize: 14, lineHeight: 1.4, textWrap: 'none', textOverflow: 'ellipsis' } as const;
+const TITLE_GAP = 4;
+const TITLE_HEIGHT = Math.ceil(TITLE_STYLE.fontSize * TITLE_STYLE.lineHeight);
 
 export type VideoDisplayMode = 'card' | 'preview';
 
@@ -22,8 +36,22 @@ export interface VideoNodeFields {
 }
 
 export interface VideoCreateOptions extends VideoNodeFields {
+  readonly title?: string;
   intrinsicWidth?: number;
   intrinsicHeight?: number;
+}
+
+export function getVideoTitleBlock(node: Readonly<NodeEntity>): TextBlock | undefined {
+  return node.textBlocks?.find((block) => block.slot === TITLE_SLOT);
+}
+
+export function getVideoTitle(node: Readonly<NodeEntity>): string {
+  const block = getVideoTitleBlock(node);
+  return block ? getPlainText(block) : '';
+}
+
+export function createVideoTitleBlock(title: string): TextBlock {
+  return { id: TITLE_SLOT, slot: TITLE_SLOT, runs: [{ text: title }] };
 }
 
 declare module '@skynote/core' {
@@ -53,9 +81,38 @@ export class VideoNodeType implements NodeTypeDefinition {
   readonly label = '视频';
   readonly defaultData = {};
   readonly defaultAspectLocked = true;
+  readonly slots = [{ slot: TITLE_SLOT, label: '标题', singleLine: true, defaultStyle: TITLE_STYLE }];
 
   supportsCornerRadius(): boolean {
     return true;
+  }
+
+  extent(node: NodeEntity): RectBounds {
+    return { left: 0, top: -(this.titleHeight(node) + TITLE_GAP), right: node.width, bottom: node.height };
+  }
+
+  private titleHeight(node: NodeEntity): number {
+    const title = getVideoTitleBlock(node);
+    if (!title) return TITLE_HEIGHT;
+    const style = resolveTextBlockStyle(node, title, this);
+    const padding = resolveTextPadding(style.padding);
+    return Math.ceil(measureSingleLineHeight(title.runs, style) + padding.top + padding.bottom);
+  }
+
+  composeTextBlock(node: NodeEntity, _context: NodeComposeContext, blockId: string): TextPrimitive | undefined {
+    const title = getVideoTitleBlock(node);
+    if (!title || title.id !== blockId) return undefined;
+    return this.titlePrimitive(node, title);
+  }
+
+  private titlePrimitive(node: NodeEntity, block: TextBlock): TextPrimitive {
+    const height = this.titleHeight(node);
+    return createTextBlockPrimitive(block, resolveTextBlockStyle(node, block, this), {
+      x: 0,
+      y: -(height + TITLE_GAP),
+      width: node.width,
+      height
+    });
   }
 
   validate({ video }: Readonly<NodeEntity>): string | null {
@@ -86,24 +143,32 @@ export class VideoNodeType implements NodeTypeDefinition {
     assetId,
     posterAssetId,
     displayMode,
+    title,
     intrinsicWidth,
     intrinsicHeight
   }: VideoCreateOptions): NodeCreateContent {
     const width = intrinsicWidth && Number.isFinite(intrinsicWidth) && intrinsicWidth > 0 ? intrinsicWidth : 480;
     const height = intrinsicHeight && Number.isFinite(intrinsicHeight) && intrinsicHeight > 0 ? intrinsicHeight : 270;
     const scale = Math.min(1, 480 / Math.max(width, height));
+    const label = title?.trim().slice(0, 120);
     return {
       width: Math.max(1, Math.round(width * scale)),
       height: Math.max(1, Math.round(height * scale)),
+      textBlocks: [createVideoTitleBlock(label ?? '')],
       video: { assetId, ...(posterAssetId && { posterAssetId }), ...(displayMode === 'preview' && { displayMode }) }
     };
   }
 
   compose(node: NodeEntity): CanvasPrimitive[] {
     const bounds = { x: 0, y: 0, width: node.width, height: node.height };
-    return node.video?.posterAssetId
-      ? [{ kind: 'image', ...bounds, assetId: node.video.posterAssetId, fit: 'cover' }]
-      : [{ kind: 'rect', ...bounds, fill: '$placeholder' }];
+    const media: CanvasPrimitive = node.video?.posterAssetId
+      ? { kind: 'image', ...bounds, assetId: node.video.posterAssetId, fit: 'cover' }
+      : { kind: 'rect', ...bounds, fill: '$placeholder' };
+    const block = getVideoTitleBlock(node);
+    const title = getVideoTitle(node).trim();
+    const visibleBlock =
+      block && title ? block : { ...(block ?? createVideoTitleBlock('')), runs: [{ text: title || '视频' }] };
+    return [media, this.titlePrimitive(node, visibleBlock)];
   }
 }
 
@@ -153,6 +218,7 @@ export function insertVideoAsset(
           options: {
             assetId: video.id,
             posterAssetId: poster?.id,
+            title: video.name,
             intrinsicWidth: video.width,
             intrinsicHeight: video.height
           },
