@@ -61,6 +61,7 @@ export class StickyNodeType implements NodeTypeDefinition {
   readonly defaultData = {};
   readonly sizingPolicy: NodeSizingPolicy = 'fixed';
   readonly defaultAspectLocked = true;
+  readonly quickConnect = true;
   readonly defaultStyle: NodeStyle = { radius: 4 };
   readonly slots: NodeTextSlotDefinition[] = [
     {

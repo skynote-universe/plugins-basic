@@ -164,6 +164,7 @@ export class ShapeNodeType implements NodeTypeDefinition {
   readonly defaultData = {};
   readonly defaultStyle: NodeStyle = { strokeWidth: 2 };
   readonly sizingPolicy: NodeSizingPolicy = 'fixed';
+  readonly quickConnect = true;
   readonly slots: NodeTextSlotDefinition[] = [
     {
       slot: LABEL_SLOT,

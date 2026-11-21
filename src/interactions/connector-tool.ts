@@ -12,7 +12,8 @@
  *    选中后经 connectNewNode 在该处新建节点并连上，内核不关心界面长什么样。
  * 6. 快速连接点：平时只是四边的小圆点，不抢画面；悬停时放大成「+」并用虚线预览将要新建的节点与连线
  *    (与单击结果完全一致，含被占位时的错开)。单击在该方向新建同类节点 (同尺寸、样式与数据，不带文字) 并连线，
- *    拖动等于从这条边画线；不支持新建的节点 (组合)、容器 (画框) 与删空即消失的节点 (自由文本) 不显示。
+ *    拖动等于从这条边画线；采用白名单机制——开发者可通过 `quickConnectTypes` 显式指定支持快捷添加的节点类型，
+ *    未指定时仅对声明了 `quickConnect: true` 的节点类型启用（容器、组合与删空即消失的节点始终不显示）。
  */
 
 import {
@@ -34,6 +35,7 @@ import {
   type CreateNodeRequest,
   type DocumentChangeSet,
   type NodeEntity,
+  type NodeTypeDefinition,
   type Point,
   type PointerHooks,
   type SessionChange,
@@ -105,6 +107,12 @@ export interface ConnectorToolOptions {
   connectorType?: string;
   /** 新连线的样式，缺省为终点箭头 */
   style?: ConnectorStyle;
+  /**
+   * 支持四边「+」快捷添加的节点类型白名单 (nodeType 集合)。
+   * - 传入时：仅白名单内的节点类型启用快捷添加（传空数组 `[]` 可完全关闭快捷添加）；
+   * - 缺省时：回退到各节点类型定义上的 `quickConnect === true` 白名单声明。
+   */
+  quickConnectTypes?: Iterable<string>;
 }
 
 export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
@@ -115,6 +123,7 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
   connectorType: string;
   /** 下一条连线的样式：界面在用户改过连线样式后更新 (沿用上次的颜色、粗细、箭头等)，整体替换而不就地修改 */
   style: ConnectorStyle;
+  private readonly quickConnectTypes?: ReadonlySet<string>;
   private ctx!: CanvasPluginContext;
   private draft: Draft | null = null;
   private readonly dropListeners = new Set<(e: ConnectorDropEvent) => void>();
@@ -128,6 +137,9 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
   constructor(options: ConnectorToolOptions = {}) {
     this.connectorType = options.connectorType ?? 'orthogonal';
     this.style = options.style ?? { endArrow: true };
+    if (options.quickConnectTypes !== undefined) {
+      this.quickConnectTypes = new Set(options.quickConnectTypes);
+    }
   }
 
   install(ctx: CanvasPluginContext): void {
@@ -360,8 +372,19 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
 
   // ==================== 「+」快速连接 ====================
 
+  /** 判断该节点类型是否在快捷添加白名单内（仍受可新建与非容器/非删空约束保护） */
+  private supportsQuickConnect(node: NodeEntity, definition: NodeTypeDefinition | undefined): boolean {
+    if (!definition?.createContent || definition.acceptsChildren || definition.removeWhenEmpty) {
+      return false;
+    }
+    if (this.quickConnectTypes !== undefined) {
+      return this.quickConnectTypes.has(node.nodeType);
+    }
+    return definition.quickConnect === true;
+  }
+
   /**
-   * 选择工具下单独选中一个可连接的节点、没有在编辑文字与拖动时，节点四边显示「+」
+   * 选择工具下单独选中一个白名单内的可连接节点、没有在编辑文字与拖动时，节点四边显示「+」
    * 布局树 (如思维导图) 中的节点不显示：它们的位置与连线由布局决定，新增分支用布局自己的方式 (如 Tab)
    */
   private drawPlus(): void {
@@ -374,8 +397,7 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
     const definition = node && ctx.nodeTypes.get(node.nodeType);
     if (
       !node ||
-      !definition?.createContent ||
-      definition?.quickConnect === false ||
+      !this.supportsQuickConnect(node, definition) ||
       node.locked ||
       session.isReadOnly ||
       this.active ||
@@ -383,8 +405,6 @@ export class ConnectorToolPlugin implements SkyNotePlugin, PointerHooks {
       this.pointerPressed ||
       session.selectedConnectorIds.size > 0 ||
       session.textEditing ||
-      definition?.acceptsChildren ||
-      definition?.removeWhenEmpty ||
       isInInstalledLayout(ctx, node.id)
     ) {
       this.clearPlus();

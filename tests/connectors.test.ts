@@ -61,8 +61,8 @@ class FakeHost implements CanvasHost, OverlayChannel {
 const fonts = { measureWidth: (text: string, font: { size: number }) => [...text].length * font.size * 0.5 };
 
 /** a (0,0) 与 b (300,0) 两个 160×100 形状 */
-function setup() {
-  const tool = new ConnectorToolPlugin();
+function setup(toolOptions?: ConstructorParameters<typeof ConnectorToolPlugin>[0]) {
+  const tool = new ConnectorToolPlugin(toolOptions);
   const engine = new SkyNoteEngine({ fonts })
     .use(new BasicNodesPlugin())
     .use(new SelectionPlugin())
@@ -338,26 +338,79 @@ describe('快速连接', () => {
     engine.destroy();
   });
 
-  it('声明 quickConnect: false 的节点类型不显示四边快捷连接「+」', () => {
+  it('默认采用白名单机制：未声明 quickConnect: true 的节点类型不显示四边快捷连接「+」', () => {
     const { engine, store, host } = setup();
     engine.use({
-      id: 'test-no-plus',
+      id: 'test-whitelist-default',
       name: '测试插件',
       version: '0.1.0',
       install(ctx) {
         ctx.registerNodeType({
-          type: 'no-plus',
-          label: '无快捷连接',
+          type: 'plain-custom',
+          label: '未声明快捷连接',
           defaultData: {},
-          quickConnect: false,
+          createContent: () => ({ width: 100, height: 100 })
+        });
+        ctx.registerNodeType({
+          type: 'opt-in-custom',
+          label: '显式启用快捷连接',
+          defaultData: {},
+          quickConnect: true,
           createContent: () => ({ width: 100, height: 100 })
         });
       }
     });
-    store.createNode({ id: 'np1', nodeType: 'no-plus', x: 200, y: 200, width: 100, height: 100 });
-    engine.session.setSelection({ nodeIds: ['np1'] });
+    store.createNode({ id: 'plain1', nodeType: 'plain-custom', x: 200, y: 200, width: 100, height: 100 });
+    store.createNode({ id: 'opt1', nodeType: 'opt-in-custom', x: 400, y: 200, width: 100, height: 100 });
+    const webLinkId = store.createNode({
+      nodeType: 'web-link',
+      x: 600,
+      y: 200,
+      options: { url: 'https://example.com' }
+    })!;
+
+    engine.session.setSelection({ nodeIds: ['plain1'] });
     expect(host.sessions.has('connector-tool:plus')).toBe(false);
+
+    engine.session.setSelection({ nodeIds: [webLinkId] });
+    expect(host.sessions.has('connector-tool:plus')).toBe(false);
+
+    engine.session.setSelection({ nodeIds: ['opt1'] });
+    expect(host.sessions.has('connector-tool:plus')).toBe(true);
     engine.destroy();
+  });
+
+  it('开发者可通过 quickConnectTypes 显式指定支持快捷添加的节点白名单', () => {
+    const { engine, store, host } = setup({ quickConnectTypes: ['custom-card'] });
+    engine.use({
+      id: 'test-explicit-whitelist',
+      name: '测试插件',
+      version: '0.1.0',
+      install(ctx) {
+        ctx.registerNodeType({
+          type: 'custom-card',
+          label: '自定义卡片',
+          defaultData: {},
+          createContent: () => ({ width: 120, height: 80 })
+        });
+      }
+    });
+    store.createNode({ id: 'card1', nodeType: 'custom-card', x: 200, y: 200, width: 120, height: 80 });
+
+    // shape 虽声明 quickConnect: true，但不在开发者指定的白名单内，不显示「+」
+    engine.session.setSelection({ nodeIds: ['a'] });
+    expect(host.sessions.has('connector-tool:plus')).toBe(false);
+
+    // custom-card 未声明 quickConnect，但在开发者指定的白名单内，显示「+」
+    engine.session.setSelection({ nodeIds: ['card1'] });
+    expect(host.sessions.has('connector-tool:plus')).toBe(true);
+    engine.destroy();
+
+    // 传入空数组可完全关闭所有节点的快捷添加
+    const disabled = setup({ quickConnectTypes: [] });
+    disabled.engine.session.setSelection({ nodeIds: ['a'] });
+    expect(disabled.host.sessions.has('connector-tool:plus')).toBe(false);
+    disabled.engine.destroy();
   });
 
   it('选中单个节点时四边出现「+」；单击右侧「+」在右边新建同类节点并连线，一步撤销', () => {
